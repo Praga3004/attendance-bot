@@ -13,7 +13,8 @@ import nacl.exceptions
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
-load_dotenv(r'../.env')  # Load env vars from .env file for local testing
+load_dotenv(r'../.env')  # fine for local; ignored in Vercel if no file
+  # Load env vars from .env file for local testing
 app = FastAPI(title="Discord Attendance → Google Sheets")
 
 # ========= ENV VARS =========
@@ -30,7 +31,7 @@ def verify_signature(signature: str, timestamp: str, body: bytes) -> bool:
         verify_key = nacl.signing.VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
         verify_key.verify(timestamp.encode() + body, bytes.fromhex(signature))
         return True
-    except nacl.exceptions.BadSignatureError:
+    except Exception:
         return False
 
 def normalize_action(action_raw: str | None) -> str:
@@ -146,4 +147,66 @@ async def discord_interaction(
         )
 
     # Fallback
+    return discord_response_message("Unsupported interaction type.", ephemeral=True)
+@app.post("/")
+async def discord_interaction(request: Request):
+    # 1) Read raw body first (needed for signature verification)
+    body: bytes = await request.body()
+
+    # 2) Read headers case-insensitively (some proxies modify casing)
+    headers = request.headers
+    sig = headers.get("x-signature-ed25519") or headers.get("X-Signature-Ed25519")
+    ts  = headers.get("x-signature-timestamp") or headers.get("X-Signature-Timestamp")
+
+    # 3) Verify signature using the PUBLIC KEY (not the bot token)
+    if not sig or not ts or not DISCORD_PUBLIC_KEY:
+        raise HTTPException(status_code=401, detail="missing signature headers or public key")
+
+    if not verify_signature(sig, ts, body):
+        raise HTTPException(status_code=401, detail="invalid request signature")
+
+    # 4) Now it's safe to parse JSON
+    payload = await request.json()
+    t = payload.get("type")
+
+    # 5) PING -> PONG
+    if t == 1:
+        return JSONResponse({"type": 1})
+
+    # 6) Application command handling (unchanged)
+    if t == 2:
+        data = payload.get("data", {})
+        cmd_name = data.get("name", "")
+
+        if cmd_name != "attendance":
+            return discord_response_message("Unknown command.", ephemeral=True)
+
+        options = data.get("options", []) or []
+        name_opt = None
+        action_opt = None
+        for opt in options:
+            if opt.get("name") == "name":
+                name_opt = opt.get("value")
+            if opt.get("name") == "action":
+                action_opt = opt.get("value")
+
+        member = payload.get("member", {}) or {}
+        user = member.get("user", {}) or payload.get("user", {}) or {}
+        fallback_name = user.get("global_name") or user.get("username") or "Unknown"
+        name = (name_opt or fallback_name).strip()
+        action = normalize_action(action_opt)
+
+        try:
+            append_attendance_row(name=name, action=action)
+        except Exception as e:
+            return discord_response_message(
+                f"❌ Failed to record attendance. Admins: {type(e).__name__}: {str(e)}",
+                ephemeral=True,
+            )
+
+        return discord_response_message(
+            f"✅ Recorded: **{name}** — **{action}** at **{get_ist_timestamp()} IST**",
+            ephemeral=True,
+        )
+
     return discord_response_message("Unsupported interaction type.", ephemeral=True)
