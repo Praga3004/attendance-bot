@@ -70,6 +70,19 @@ def append_attendance_row(name: str, action: str) -> None:
         insertDataOption="INSERT_ROWS",
         body=body,
     ).execute()
+def append_leave_row(name: str, from_date: str, to_date: str, reason: str) -> None:
+    if not SHEET_ID:
+        raise RuntimeError("SHEET_ID env var missing")
+    service = get_service()
+    values = [[get_ist_timestamp(), name, from_date, to_date, reason]]
+    body = {"values": values}
+    service.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID,
+        range="'Leave Requests'!A:E",  # ← Create a sheet/tab named exactly this
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body=body,
+    ).execute()
 
 def discord_response_message(content: str, ephemeral: bool = True) -> JSONResponse:
     data = {"content": content}
@@ -107,6 +120,41 @@ async def discord_interaction(
     if t == 2:
         data = payload.get("data", {})
         cmd_name = data.get("name", "")
+        if cmd_name == "leaverequest":
+            options = data.get("options", []) or []
+            name_opt = None
+            from_opt = None
+            to_opt = None
+            reason_opt = None
+
+            for opt in options:
+                if opt.get("name") == "name":
+                    name_opt = opt.get("value")
+                elif opt.get("name") == "from":
+                    from_opt = opt.get("value")
+                elif opt.get("name") == "to":
+                    to_opt = opt.get("value")
+                elif opt.get("name") == "reason":
+                    reason_opt = opt.get("value")
+
+            member = payload.get("member", {}) or {}
+            user = member.get("user", {}) or payload.get("user", {}) or {}
+            fallback_name = user.get("global_name") or user.get("username") or "Unknown"
+            name = (name_opt or fallback_name).strip()
+
+            try:
+                append_leave_row(name=name, from_date=from_opt, to_date=to_opt, reason=reason_opt)
+            except Exception as e:
+                return discord_response_message(
+                    f"❌ Failed to record leave request. Admins: {type(e).__name__}: {str(e)}",
+                    ephemeral=True,
+                )
+
+            return discord_response_message(
+                f"✅ Leave request submitted by **{name}** from **{from_opt}** to **{to_opt}**.\nReason: {reason_opt}",
+                ephemeral=True,
+            )
+
 
         if cmd_name != "attendance":
             return discord_response_message("Unknown command.", ephemeral=True)
