@@ -43,6 +43,33 @@ def normalize_action(action_raw: str | None) -> str:
 def get_ist_timestamp() -> str:
     # Asia/Kolkata, 24h format, e.g. 2025-10-08 10:05:12
     return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
+def create_google_meet_event(summary: str, start_str: str, end_str: str, guests: list[str]):
+    creds = service_account.Credentials.from_service_account_info(
+        json.loads(SERVICE_ACCOUNT_JSON),
+        scopes=["https://www.googleapis.com/auth/calendar"]
+    )
+    service = build("calendar", "v3", credentials=creds)
+
+    event = {
+        'summary': summary,
+        'start': {'dateTime': start_str, 'timeZone': 'Asia/Kolkata'},
+        'end': {'dateTime': end_str, 'timeZone': 'Asia/Kolkata'},
+        'attendees': [{'email': g} for g in guests],
+        'conferenceData': {
+            'createRequest': {
+                'requestId': f"discord-meet-{int(time.time())}",
+                'conferenceSolutionKey': {'type': 'hangoutsMeet'},
+            }
+        },
+    }
+
+    event = service.events().insert(
+        calendarId='primary',
+        body=event,
+        conferenceDataVersion=1
+    ).execute()
+
+    return event.get("hangoutLink", "No Meet Link Found")
 
 def get_service():
     if not SERVICE_ACCOUNT_JSON:
@@ -105,31 +132,60 @@ async def discord_interaction(
 ):
     body = await request.body()
 
-    # 1) Verify Discord signature
+    # Verify Discord signature
     if not verify_signature(x_signature_ed25519, x_signature_timestamp, body):
         raise HTTPException(status_code=401, detail="invalid request signature")
 
     payload = await request.json()
     t = payload.get("type")
 
-    # 2) PING → PONG
+    # 1️⃣ PING → PONG
     if t == 1:
         return JSONResponse({"type": 1})
 
-    # 3) Application Command
+    # 2️⃣ Handle Application Command
     if t == 2:
         data = payload.get("data", {})
         cmd_name = data.get("name", "")
-        if cmd_name == "leaverequest":
+
+        # ====== 🟢 ATTENDANCE ======
+        if cmd_name == "attendance":
             options = data.get("options", []) or []
             name_opt = None
-            from_opt = None
-            to_opt = None
-            reason_opt = None
-
+            action_opt = None
             for opt in options:
                 if opt.get("name") == "name":
                     name_opt = opt.get("value")
+                if opt.get("name") == "action":
+                    action_opt = opt.get("value")
+
+            member = payload.get("member", {}) or {}
+            user = member.get("user", {}) or payload.get("user", {}) or {}
+            fallback_name = user.get("global_name") or user.get("username") or "Unknown"
+            name = (name_opt or fallback_name).strip()
+            action = normalize_action(action_opt)
+
+            try:
+                append_attendance_row(name=name, action=action)
+            except Exception as e:
+                return discord_response_message(
+                    f"❌ Failed to record attendance. {type(e).__name__}: {str(e)}",
+                    ephemeral=True,
+                )
+
+            return discord_response_message(
+                f"✅ Recorded: **{name}** — **{action}** at **{get_ist_timestamp()} IST**",
+                ephemeral=True,
+            )
+
+        # ====== 🟢 LEAVE REQUEST ======
+        if cmd_name == "leaverequest":
+            options = data.get("options", []) or []
+            name = from_opt = to_opt = reason_opt = None
+
+            for opt in options:
+                if opt.get("name") == "name":
+                    name = opt.get("value")
                 elif opt.get("name") == "from":
                     from_opt = opt.get("value")
                 elif opt.get("name") == "to":
@@ -140,13 +196,13 @@ async def discord_interaction(
             member = payload.get("member", {}) or {}
             user = member.get("user", {}) or payload.get("user", {}) or {}
             fallback_name = user.get("global_name") or user.get("username") or "Unknown"
-            name = (name_opt or fallback_name).strip()
+            name = (name or fallback_name).strip()
 
             try:
                 append_leave_row(name=name, from_date=from_opt, to_date=to_opt, reason=reason_opt)
             except Exception as e:
                 return discord_response_message(
-                    f"❌ Failed to record leave request. Admins: {type(e).__name__}: {str(e)}",
+                    f"❌ Failed to record leave. {type(e).__name__}: {str(e)}",
                     ephemeral=True,
                 )
 
@@ -155,106 +211,41 @@ async def discord_interaction(
                 ephemeral=True,
             )
 
+        # ====== 🟢 SCHEDULE MEET ======
+        if cmd_name == "schedulemeet":
+            options = data.get("options", []) or []
+            title, start_str, end_str, guests_str = None, None, None, None
 
-        if cmd_name != "attendance":
-            return discord_response_message("Unknown command.", ephemeral=True)
+            for opt in options:
+                if opt.get("name") == "title":
+                    title = opt.get("value")
+                elif opt.get("name") == "start":
+                    start_str = opt.get("value")
+                elif opt.get("name") == "end":
+                    end_str = opt.get("value")
+                elif opt.get("name") == "guests":
+                    guests_str = opt.get("value")
 
-        # Extract options if provided
-        options = data.get("options", []) or []
-        # Default to Discord user's display name + action=Login
-        # (You can define options in your slash command to send explicit name/action)
-        name_opt = None
-        action_opt = None
-        for opt in options:
-            if opt.get("name") == "name":
-                name_opt = opt.get("value")
-            if opt.get("name") == "action":
-                action_opt = opt.get("value")
+            if not title or not start_str or not end_str:
+                return discord_response_message("❌ Missing required fields (title/start/end).", ephemeral=True)
 
-        # Derive user name if not provided
-        member = payload.get("member", {}) or {}
-        user = member.get("user", {}) or payload.get("user", {}) or {}
-        fallback_name = user.get("global_name") or user.get("username") or "Unknown"
-        name = (name_opt or fallback_name).strip()
-        action = normalize_action(action_opt)
+            # Parse guest emails (comma separated)
+            guests = [g.strip() for g in (guests_str or "").split(",") if g.strip()]
 
-        # Append to Google Sheets
-        try:
-            append_attendance_row(name=name, action=action)
-        except Exception as e:
-            # Return an ephemeral error message to user
+            # Create meet
+            try:
+                meet_link = create_google_meet_event(title, start_str, end_str, guests)
+            except Exception as e:
+                return discord_response_message(
+                    f"❌ Failed to schedule meet. {type(e).__name__}: {str(e)}",
+                    ephemeral=True,
+                )
+
             return discord_response_message(
-                f"❌ Failed to record attendance. Admins: {type(e).__name__}: {str(e)}",
-                ephemeral=True,
+                f"✅ **Google Meet Scheduled!**\n📅 **{title}**\n🕒 {start_str} → {end_str}\n🔗 Meet Link: {meet_link}",
+                ephemeral=False,
             )
 
-        # Success response
-        return discord_response_message(
-            f"✅ Recorded: **{name}** — **{action}** at **{get_ist_timestamp()} IST**",
-            ephemeral=True,
-        )
-
-    # Fallback
-    return discord_response_message("Unsupported interaction type.", ephemeral=True)
-@app.post("/")
-async def discord_interaction(request: Request):
-    # 1) Read raw body first (needed for signature verification)
-    body: bytes = await request.body()
-
-    # 2) Read headers case-insensitively (some proxies modify casing)
-    headers = request.headers
-    sig = headers.get("x-signature-ed25519") or headers.get("X-Signature-Ed25519")
-    ts  = headers.get("x-signature-timestamp") or headers.get("X-Signature-Timestamp")
-
-    # 3) Verify signature using the PUBLIC KEY (not the bot token)
-    if not sig or not ts or not DISCORD_PUBLIC_KEY:
-        raise HTTPException(status_code=401, detail="missing signature headers or public key")
-
-    if not verify_signature(sig, ts, body):
-        raise HTTPException(status_code=401, detail="invalid request signature")
-
-    # 4) Now it's safe to parse JSON
-    payload = await request.json()
-    t = payload.get("type")
-
-    # 5) PING -> PONG
-    if t == 1:
-        return JSONResponse({"type": 1})
-
-    # 6) Application command handling (unchanged)
-    if t == 2:
-        data = payload.get("data", {})
-        cmd_name = data.get("name", "")
-
-        if cmd_name != "attendance":
-            return discord_response_message("Unknown command.", ephemeral=True)
-
-        options = data.get("options", []) or []
-        name_opt = None
-        action_opt = None
-        for opt in options:
-            if opt.get("name") == "name":
-                name_opt = opt.get("value")
-            if opt.get("name") == "action":
-                action_opt = opt.get("value")
-
-        member = payload.get("member", {}) or {}
-        user = member.get("user", {}) or payload.get("user", {}) or {}
-        fallback_name = user.get("global_name") or user.get("username") or "Unknown"
-        name = (name_opt or fallback_name).strip()
-        action = normalize_action(action_opt)
-
-        try:
-            append_attendance_row(name=name, action=action)
-        except Exception as e:
-            return discord_response_message(
-                f"❌ Failed to record attendance. Admins: {type(e).__name__}: {str(e)}",
-                ephemeral=True,
-            )
-
-        return discord_response_message(
-            f"✅ Recorded: **{name}** — **{action}** at **{get_ist_timestamp()} IST**",
-            ephemeral=True,
-        )
+        return discord_response_message("Unknown command.", ephemeral=True)
 
     return discord_response_message("Unsupported interaction type.", ephemeral=True)
