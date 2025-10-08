@@ -13,7 +13,7 @@ import nacl.exceptions
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
-load_dotenv('..\.env')  # Load env vars from .env file for local testing
+load_dotenv(r'../.env')  # Load env vars from .env file for local testing
 app = FastAPI(title="Discord Attendance → Google Sheets")
 
 # ========= ENV VARS =========
