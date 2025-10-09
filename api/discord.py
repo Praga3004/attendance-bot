@@ -15,49 +15,70 @@ from googleapiclient.discovery import build
 from dotenv import load_dotenv
 import requests
 load_dotenv(r'../.env')
-def notify_approver(name, from_date, to_date, reason):
-    approver_id = os.environ.get("APPROVER_USER_ID", "")
-    channel_id = os.environ.get("APPROVER_CHANNEL_ID", "")
-    bot_token = os.environ.get("BOT_TOKEN", "")
+import requests
+
+def notify_approver(name, from_date, to_date, reason, fallback_channel_id=None):
+    approver_id = os.environ.get("APPROVER_USER_ID", "").strip()
+    channel_id  = os.environ.get("APPROVER_CHANNEL_ID", "").strip()
+    bot_token   = os.environ.get("BOT_TOKEN", "").strip()
 
     if not bot_token:
         print("❌ BOT_TOKEN missing in env")
-        return
+        return False
 
-    message = (
+    msg = (
         f"📩 **Leave Request from {name}**\n"
         f"🗓️ **From:** {from_date}\n"
         f"🗓️ **To:** {to_date}\n"
-        f"💬 **Reason:** {reason}\n\n"
+        f"💬 **Reason:** {reason}\n"
         f"Please review and respond accordingly."
     )
 
     headers = {
         "Authorization": f"Bot {bot_token}",
         "Content-Type": "application/json",
+        "User-Agent": "DiscordBot (https://example.com, 1.0)"
     }
 
-    # Prefer sending to channel if defined, else DM the approver
-    if channel_id:
-        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
-    elif approver_id:
-        # Create DM channel first
-        dm_res = requests.post(
-            "https://discord.com/api/v10/users/@me/channels",
-            headers=headers,
-            json={"recipient_id": approver_id},
-        )
-        dm_channel_id = dm_res.json().get("id")
-        url = f"https://discord.com/api/v10/channels/{dm_channel_id}/messages"
-    else:
-        print("⚠️ No approver target configured")
-        return
+    def post_message(to_channel_id: str):
+        url = f"https://discord.com/api/v10/channels/{to_channel_id}/messages"
+        r = requests.post(url, headers=headers, json={"content": msg}, timeout=15)
+        print(f"POST {url} -> {r.status_code} {r.text}")
+        r.raise_for_status()
+        return True
 
     try:
-        requests.post(url, headers=headers, json={"content": message})
-        print(f"✅ Notified approver ({approver_id or channel_id}) successfully.")
+        # Prefer a configured channel; fallback to current interaction channel if provided
+        if channel_id:
+            return post_message(channel_id)
+
+        # Else DM the approver
+        if approver_id:
+            dm_res = requests.post(
+                "https://discord.com/api/v10/users/@me/channels",
+                headers=headers,
+                json={"recipient_id": approver_id},
+                timeout=15
+            )
+            print(f"Create DM -> {dm_res.status_code} {dm_res.text}")
+            dm_res.raise_for_status()
+            dm_channel_id = dm_res.json().get("id")
+            return post_message(dm_channel_id)
+
+        # Final fallback: post where the interaction happened (if provided)
+        if fallback_channel_id:
+            return post_message(fallback_channel_id)
+
+        print("⚠️ No APPROVER_CHANNEL_ID/APPROVER_USER_ID/fallback channel; not sending.")
+        return False
+
+    except requests.HTTPError as e:
+        print(f"❌ Discord API error: {e}")
+        return False
     except Exception as e:
-        print(f"❌ Failed to notify approver: {e}")
+        print(f"❌ Unexpected error notifying approver: {e}")
+        return False
+
   # fine for local; ignored in Vercel if no file
   # Load env vars from .env file for local testing
 app = FastAPI(title="Discord Attendance → Google Sheets")
