@@ -17,82 +17,73 @@ import requests
 load_dotenv(r'../.env')
 import requests
 
-def notify_approver(name, from_date, to_date, reason, fallback_channel_id=None):
-    approver_id = os.environ.get("APPROVER_USER_ID", "").strip()
-    channel_id  = os.environ.get("APPROVER_CHANNEL_ID", "").strip()
-    bot_token   = os.environ.get("BOT_TOKEN", "").strip()
+import requests
+
+def notify_approver(name, from_date, to_date, reason, fallback_channel_id=None) -> bool:
+    bot_token = os.environ.get("BOT_TOKEN", "").strip()
+    approver_channel_id = os.environ.get("APPROVER_CHANNEL_ID", "").strip()
+    approver_user_id    = os.environ.get("APPROVER_USER_ID", "").strip()
 
     if not bot_token:
         print("❌ BOT_TOKEN missing in env")
         return False
 
-    msg = (
+    content = (
         f"📩 **Leave Request from {name}**\n"
         f"🗓️ **From:** {from_date}\n"
         f"🗓️ **To:** {to_date}\n"
-        f"💬 **Reason:** {reason}\n"
+        f"💬 **Reason:** {reason}\n\n"
         f"Please review and respond accordingly."
     )
+
+    components = [{
+        "type": 1,  # ACTION_ROW
+        "components": [
+            {"type": 2, "style": 3, "label": "Approve", "custom_id": "leave_approve"},
+            {"type": 2, "style": 4, "label": "Reject",  "custom_id": "leave_reject" }
+        ]
+    }]
 
     headers = {
         "Authorization": f"Bot {bot_token}",
         "Content-Type": "application/json",
-        "User-Agent": "DiscordBot (https://example.com, 1.0)"
+        "User-Agent": "DiscordBot (https://example.com, 1.0)",
     }
-    components = [
-        {
-            "type": 1,  # action row
-            "components": [
-                {
-                    "type": 2, "style": 3, "label": "Approve",
-                    "custom_id": "leave_approve"  # handled in interaction type 3
-                },
-                {
-                    "type": 2, "style": 4, "label": "Reject",
-                    "custom_id": "leave_reject"
-                }
-            ]
-        }
-    ]
 
-    def post_message(to_channel_id: str):
-        url = f"https://discord.com/api/v10/channels/{to_channel_id}/messages"
-        r = requests.post(
-            url, headers=headers,
-            json={"content": msg, "components": components},
-            timeout=15
-        )
+    def post_to_channel(channel_id: str) -> bool:
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+        r = requests.post(url, headers=headers, json={"content": content, "components": components}, timeout=15)
         print(f"POST {url} -> {r.status_code} {r.text}")
         r.raise_for_status()
         return True
 
     try:
-        if channel_id:
-            return post_message(channel_id)
+        if approver_channel_id:
+            return post_to_channel(approver_channel_id)
 
-        if approver_id:
-            # Create DM then post
-            dm_res = requests.post(
+        if approver_user_id:
+            dm = requests.post(
                 "https://discord.com/api/v10/users/@me/channels",
-                headers=headers, json={"recipient_id": approver_id}, timeout=15
+                headers=headers, json={"recipient_id": approver_user_id}, timeout=15
             )
-            print(f"Create DM -> {dm_res.status_code} {dm_res.text}")
-            dm_res.raise_for_status()
-            dm_channel_id = dm_res.json().get("id")
-            return post_message(dm_channel_id)
+            print(f"Create DM -> {dm.status_code} {dm.text}")
+            dm.raise_for_status()
+            dm_channel_id = dm.json().get("id")
+            return post_to_channel(dm_channel_id)
 
         if fallback_channel_id:
-            return post_message(fallback_channel_id)
+            return post_to_channel(fallback_channel_id)
 
-        print("⚠️ No target configured for approver notification.")
+        print("⚠️ No APPROVER_CHANNEL_ID/APPROVER_USER_ID/fallback; not notifying.")
         return False
 
     except requests.HTTPError as e:
-        print(f"❌ Discord API error: {e}")
+        print(f"❌ Discord API error while notifying approver: {e}")
         return False
     except Exception as e:
-        print(f"❌ Unexpected error notifying approver: {e}")
+        print(f"❌ Unexpected error while notifying approver: {e}")
         return False
+
 
 def append_leave_decision_row(name: str, from_date: str, to_date: str, reason: str,
                               decision: str, reviewer: str) -> None:
@@ -340,52 +331,95 @@ async def discord_interaction(
         return discord_response_message("Unknown command.", ephemeral=True)
 
     # 3) MESSAGE_COMPONENT (button clicks)
-    if t == 3:
+    # 3) MESSAGE_COMPONENT (button clicks)
+    if t == 3:  # MESSAGE_COMPONENT
         data = payload.get("data", {}) or {}
         custom_id = data.get("custom_id", "")
         message = payload.get("message", {}) or {}
         content = message.get("content", "") or ""
 
+        # Who clicked (the reviewer)
         member = payload.get("member", {}) or {}
         user = member.get("user", {}) or payload.get("user", {}) or {}
         reviewer = (user.get("global_name") or user.get("username") or "Unknown").strip()
 
-        # naive parse of our earlier message format
-        def extract(field: str) -> str:
-            key = f"**{field}:** "
-            if key in content:
-                after = content.split(key, 1)[1]
+        # ---- Robust field extraction from the message text ----
+        def grab_between(prefix: str, text: str) -> str:
+            if prefix in text:
+                after = text.split(prefix, 1)[1]
                 return after.split("\n", 1)[0].strip()
             return ""
 
-        req_name = extract("Leave Request from").strip("* ") or extract("Leave Request from")
-        from_str = extract("From")
-        to_str   = extract("To")
-        reason   = extract("Reason")
+        # First line can be like: "📩 **Leave Request from praga**"
+        first_line = (content.split("\n", 1)[0] if content else "").strip()
+        req_name = first_line
+        for marker in ["**Leave Request from ", "Leave Request from ", "📩 **Leave Request from "]:
+            if marker in req_name:
+                req_name = req_name.split(marker, 1)[1]
+                break
+        req_name = req_name.strip("* ").strip()
 
-        if custom_id in ("leave_approve", "leave_reject"):
-            decision = "Approved" if custom_id == "leave_approve" else "Rejected"
+        from_str = grab_between("**From:** ", content)
+        to_str   = grab_between("**To:** ", content)
+        reason   = grab_between("**Reason:** ", content)
 
-            # record decision
-            try:
-                append_leave_decision_row(req_name, from_str, to_str, reason, decision, reviewer)
-            except Exception as e:
-                return JSONResponse({
-                    "type": 4,
-                    "data": {"content": f"❌ Failed to record decision. {type(e).__name__}: {e}", "flags": 1 << 6}
-                })
+        # Validate we have the minimum fields
+        if not (req_name and from_str and to_str):
+            return JSONResponse({
+                "type": 4,  # CHANNEL_MESSAGE_WITH_SOURCE
+                "data": {
+                    "content": "❌ Could not parse the request details from this message.",
+                    "flags": 1 << 6  # ephemeral
+                }
+            })
 
-            # update original message & disable buttons
-            new_content = content + f"\n\n**Status:** {decision} by **{reviewer}** at **{get_ist_timestamp()} IST**"
-            disabled_components = [{
-                "type": 1,
-                "components": [
-                    {"type": 2, "style": 3, "label": "Approve", "custom_id": "leave_approve", "disabled": True},
-                    {"type": 2, "style": 4, "label": "Reject",  "custom_id": "leave_reject",  "disabled": True},
-                ]
-            }]
-            return JSONResponse({"type": 7, "data": {"content": new_content, "components": disabled_components}})
+        # Only handle our two buttons
+        if custom_id not in ("leave_approve", "leave_reject"):
+            return JSONResponse({
+                "type": 4,
+                "data": {"content": "Unsupported action.", "flags": 1 << 6}
+            })
 
-        return JSONResponse({"type": 4, "data": {"content": "Unsupported action.", "flags": 1 << 6}})
+        decision = "Approved" if custom_id == "leave_approve" else "Rejected"
+
+        # Write decision to Google Sheets
+        try:
+            append_leave_decision_row(
+                name=req_name,
+                from_date=from_str,
+                to_date=to_str,
+                reason=reason,
+                decision=decision,
+                reviewer=reviewer
+            )
+        except Exception as e:
+            return JSONResponse({
+                "type": 4,
+                "data": {
+                    "content": f"❌ Failed to record decision. {type(e).__name__}: {e}",
+                    "flags": 1 << 6
+                }
+            })
+
+        # Update original message and disable buttons
+        new_content = (
+            content
+            + f"\n\n**Status:** {decision} by **{reviewer}** at **{get_ist_timestamp()} IST**"
+        )
+        disabled_components = [{
+            "type": 1,  # action row
+            "components": [
+                {"type": 2, "style": 3, "label": "Approve", "custom_id": "leave_approve", "disabled": True},
+                {"type": 2, "style": 4, "label": "Reject",  "custom_id": "leave_reject",  "disabled": True},
+            ]
+        }]
+
+        return JSONResponse({
+            "type": 7,  # UPDATE_MESSAGE
+            "data": {"content": new_content, "components": disabled_components}
+        })
+
+    if t == 4:  # APPLICATION_COMMAND_AUTOCOMPLETE
+        return JSONResponse({"type": 8, "data": {"choices": []}})
 
     return discord_response_message("Unsupported interaction type.", ephemeral=True)
