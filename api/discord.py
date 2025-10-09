@@ -13,7 +13,52 @@ import nacl.exceptions
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
-load_dotenv(r'../.env')  # fine for local; ignored in Vercel if no file
+import requests
+load_dotenv(r'../.env')
+def notify_approver(name, from_date, to_date, reason):
+    approver_id = os.environ.get("APPROVER_USER_ID", "")
+    channel_id = os.environ.get("APPROVER_CHANNEL_ID", "")
+    bot_token = os.environ.get("BOT_TOKEN", "")
+
+    if not bot_token:
+        print("❌ BOT_TOKEN missing in env")
+        return
+
+    message = (
+        f"📩 **Leave Request from {name}**\n"
+        f"🗓️ **From:** {from_date}\n"
+        f"🗓️ **To:** {to_date}\n"
+        f"💬 **Reason:** {reason}\n\n"
+        f"Please review and respond accordingly."
+    )
+
+    headers = {
+        "Authorization": f"Bot {bot_token}",
+        "Content-Type": "application/json",
+    }
+
+    # Prefer sending to channel if defined, else DM the approver
+    if channel_id:
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    elif approver_id:
+        # Create DM channel first
+        dm_res = requests.post(
+            "https://discord.com/api/v10/users/@me/channels",
+            headers=headers,
+            json={"recipient_id": approver_id},
+        )
+        dm_channel_id = dm_res.json().get("id")
+        url = f"https://discord.com/api/v10/channels/{dm_channel_id}/messages"
+    else:
+        print("⚠️ No approver target configured")
+        return
+
+    try:
+        requests.post(url, headers=headers, json={"content": message})
+        print(f"✅ Notified approver ({approver_id or channel_id}) successfully.")
+    except Exception as e:
+        print(f"❌ Failed to notify approver: {e}")
+  # fine for local; ignored in Vercel if no file
   # Load env vars from .env file for local testing
 app = FastAPI(title="Discord Attendance → Google Sheets")
 
@@ -200,6 +245,7 @@ async def discord_interaction(
 
             try:
                 append_leave_row(name=name, from_date=from_opt, to_date=to_opt, reason=reason_opt)
+                notify_approver(name, from_opt, to_opt, reason_opt)
             except Exception as e:
                 return discord_response_message(
                     f"❌ Failed to record leave. {type(e).__name__}: {str(e)}",
