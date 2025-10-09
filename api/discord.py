@@ -18,6 +18,50 @@ load_dotenv(r'../.env')
 import requests
 
 import requests
+def post_leave_status_update(name: str, from_date: str, to_date: str, reason: str,
+                             decision: str, reviewer: str, fallback_channel_id: str | None):
+    """
+    Sends a summary message like:
+    ✅ Leave Approved for <name> (dates, reason) by <reviewer>
+    to the configured channel.
+    """
+    bot_token = os.environ.get("BOT_TOKEN", "").strip()
+    # Prefer explicit leave status channel; else use approver channel; else the interaction channel
+    status_channel_id = (
+        os.environ.get("LEAVE_STATUS_CHANNEL_ID", "").strip()
+        or os.environ.get("APPROVER_CHANNEL_ID", "").strip()
+        or (fallback_channel_id or "").strip()
+    )
+
+    if not bot_token or not status_channel_id:
+        print("⚠️ Skipping status post (missing BOT_TOKEN or channel id).")
+        return False
+
+    icon = "✅" if decision.lower() == "approved" else "❌"
+    content = (
+        f"{icon} **Leave {decision}**\n"
+        f"👤 **Employee:** {name}\n"
+        f"🗓️ **From:** {from_date}\n"
+        f"🗓️ **To:** {to_date}\n"
+        f"💬 **Reason:** {reason}\n"
+        f"🧑‍💼 **Reviewer:** {reviewer} — **{get_ist_timestamp()} IST**"
+    )
+
+    headers = {
+        "Authorization": f"Bot {bot_token}",
+        "Content-Type": "application/json",
+        "User-Agent": "DiscordBot (https://example.com, 1.0)",
+    }
+    url = f"https://discord.com/api/v10/channels/{status_channel_id}/messages"
+
+    try:
+        r = requests.post(url, headers=headers, json={"content": content}, timeout=15)
+        print(f"POST {url} -> {r.status_code} {r.text}")
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"❌ Failed to post leave status update: {e}")
+        return False
 
 def notify_approver(name, from_date, to_date, reason, fallback_channel_id=None) -> bool:
     bot_token = os.environ.get("BOT_TOKEN", "").strip()
@@ -332,6 +376,7 @@ async def discord_interaction(
 
     # 3) MESSAGE_COMPONENT (button clicks)
     # 3) MESSAGE_COMPONENT (button clicks)
+    # 3) MESSAGE_COMPONENT (button clicks)
     if t == 3:  # MESSAGE_COMPONENT
         data = payload.get("data", {}) or {}
         custom_id = data.get("custom_id", "")
@@ -350,7 +395,7 @@ async def discord_interaction(
                 return after.split("\n", 1)[0].strip()
             return ""
 
-        # First line can be like: "📩 **Leave Request from praga**"
+        # First line like: "📩 **Leave Request from praga**"
         first_line = (content.split("\n", 1)[0] if content else "").strip()
         req_name = first_line
         for marker in ["**Leave Request from ", "Leave Request from ", "📩 **Leave Request from "]:
@@ -375,10 +420,7 @@ async def discord_interaction(
 
         # Only handle our two buttons
         if custom_id not in ("leave_approve", "leave_reject"):
-            return JSONResponse({
-                "type": 4,
-                "data": {"content": "Unsupported action.", "flags": 1 << 6}
-            })
+            return JSONResponse({"type": 4, "data": {"content": "Unsupported action.", "flags": 1 << 6}})
 
         decision = "Approved" if custom_id == "leave_approve" else "Rejected"
 
@@ -395,10 +437,7 @@ async def discord_interaction(
         except Exception as e:
             return JSONResponse({
                 "type": 4,
-                "data": {
-                    "content": f"❌ Failed to record decision. {type(e).__name__}: {e}",
-                    "flags": 1 << 6
-                }
+                "data": {"content": f"❌ Failed to record decision. {type(e).__name__}: {e}", "flags": 1 << 6}
             })
 
         # Update original message and disable buttons
@@ -414,10 +453,20 @@ async def discord_interaction(
             ]
         }]
 
-        return JSONResponse({
-            "type": 7,  # UPDATE_MESSAGE
-            "data": {"content": new_content, "components": disabled_components}
-        })
+        # Post a status summary in the Leave Request channel (or fallback)
+        fallback_channel_id = payload.get("channel_id")
+        post_leave_status_update(
+            name=req_name,
+            from_date=from_str,
+            to_date=to_str,
+            reason=reason,
+            decision=decision,
+            reviewer=reviewer,
+            fallback_channel_id=fallback_channel_id
+        )
+
+        # Return the updated card
+        return JSONResponse({"type": 7, "data": {"content": new_content, "components": disabled_components}})
 
     if t == 4:  # APPLICATION_COMMAND_AUTOCOMPLETE
         return JSONResponse({"type": 8, "data": {"choices": []}})
