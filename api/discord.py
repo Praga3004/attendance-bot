@@ -247,26 +247,27 @@ def _overlap_days(d1_start: date, d1_end: date, d2_start: date, d2_end: date) ->
         return 0
     return (hi - lo).days + 1
 
-def fetch_leave_requests_rows() -> list[list[str]]:
-    """Returns rows from 'Leave Requests'!A:E (including header if present)."""
+def fetch_leave_decisions_rows() -> list[list[str]]:
+    """Returns rows from 'Leave Decisions'!A:G (including header if present)."""
     service = get_service()
     resp = service.spreadsheets().values().get(
         spreadsheetId=SHEET_ID,
-        range="'Leave Requests'!A:E"
+        range="'Leave Decisions'!A:G"
     ).execute()
     return resp.get("values", []) or []
 
+
 def count_user_leaves_current_month(target_name: str) -> tuple[int, int, list[tuple[date, date, int]]]:
-    """
-    Returns: (num_requests_overlapping, total_days_in_month, details_list)
-    details_list items: (from_date, to_date, overlap_days_in_month)
-    """
-    rows = fetch_leave_requests_rows()
+    rows = fetch_leave_decisions_rows()
     if not rows:
         return 0, 0, []
 
-    # Detect if first row is a header by checking for text 'name' or 'reason'
-    start_idx = 1 if rows and rows[0] and any(k in rows[0][1].lower() for k in ["name"]) else 0
+    # Detect header (column B typically 'name' and column F 'decision')
+    start_idx = 0
+    if rows and rows[0]:
+        header = [c.lower() for c in rows[0]]
+        if ("name" in (header[1] if len(header) > 1 else "")) or ("decision" in (header[5] if len(header) > 5 else "")):
+            start_idx = 1
 
     month_start, month_end = _month_bounds_ist()
     req_count = 0
@@ -274,11 +275,12 @@ def count_user_leaves_current_month(target_name: str) -> tuple[int, int, list[tu
     details: list[tuple[date, date, int]] = []
 
     for r in rows[start_idx:]:
-        # Layout: [A:timestamp, B:name, C:from, D:to, E:reason]
-        if len(r) < 4:
+        # Expected: A:timestamp, B:name, C:from, D:to, E:reason, F:decision, G:reviewer
+        if len(r) < 6:
             continue
         name = (r[1] or "").strip()
-        if not name:
+        decision = (r[5] or "").strip().lower()
+        if not name or decision != "approved":
             continue
         if name.lower() != (target_name or "").strip().lower():
             continue
@@ -297,6 +299,7 @@ def count_user_leaves_current_month(target_name: str) -> tuple[int, int, list[tu
             details.append((d_from, d_to, od))
 
     return req_count, total_days, details
+
 # ========= ROUTE =========
 @app.post("/")
 async def discord_interaction(
