@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 import os, json, time
 from datetime import datetime
 from zoneinfo import ZoneInfo
-
+from datetime import timedelta
 # Discord signature verification
 import nacl.signing
 import nacl.exceptions
@@ -16,6 +16,8 @@ from googleapiclient.discovery import build
 # Utils
 from dotenv import load_dotenv
 import requests
+from datetime import date
+
 
 # Load local .env only for local testing; ignored on Vercel
 load_dotenv(r"../.env")
@@ -220,7 +222,81 @@ def discord_response_message(content: str, ephemeral: bool = True) -> JSONRespon
     if ephemeral:
         data["flags"] = 1 << 6  # ephemeral flag = 64
     return JSONResponse({"type": 4, "data": data})  # CHANNEL_MESSAGE_WITH_SOURCE
+def _month_bounds_ist() -> tuple[date, date]:
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    start = date(year=now.year, month=now.month, day=1)
+    # compute end-of-month
+    if now.month == 12:
+        end = date(year=now.year, month=12, day=31)
+    else:
+        first_next = date(year=now.year, month=now.month + 1, day=1)
+        end = first_next - timedelta(days=1)
+    return start, end
 
+def _parse_ymd(s: str) -> date | None:
+    try:
+        return datetime.strptime(s.strip(), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def _overlap_days(d1_start: date, d1_end: date, d2_start: date, d2_end: date) -> int:
+    """Inclusive overlap days between [d1_start,d1_end] and [d2_start,d2_end]."""
+    lo = max(d1_start, d2_start)
+    hi = min(d1_end, d2_end)
+    if lo > hi:
+        return 0
+    return (hi - lo).days + 1
+
+def fetch_leave_requests_rows() -> list[list[str]]:
+    """Returns rows from 'Leave Requests'!A:E (including header if present)."""
+    service = get_service()
+    resp = service.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID,
+        range="'Leave Requests'!A:E"
+    ).execute()
+    return resp.get("values", []) or []
+
+def count_user_leaves_current_month(target_name: str) -> tuple[int, int, list[tuple[date, date, int]]]:
+    """
+    Returns: (num_requests_overlapping, total_days_in_month, details_list)
+    details_list items: (from_date, to_date, overlap_days_in_month)
+    """
+    rows = fetch_leave_requests_rows()
+    if not rows:
+        return 0, 0, []
+
+    # Detect if first row is a header by checking for text 'name' or 'reason'
+    start_idx = 1 if rows and rows[0] and any(k in rows[0][1].lower() for k in ["name"]) else 0
+
+    month_start, month_end = _month_bounds_ist()
+    req_count = 0
+    total_days = 0
+    details: list[tuple[date, date, int]] = []
+
+    for r in rows[start_idx:]:
+        # Layout: [A:timestamp, B:name, C:from, D:to, E:reason]
+        if len(r) < 4:
+            continue
+        name = (r[1] or "").strip()
+        if not name:
+            continue
+        if name.lower() != (target_name or "").strip().lower():
+            continue
+
+        d_from = _parse_ymd(r[2]) if len(r) > 2 else None
+        d_to   = _parse_ymd(r[3]) if len(r) > 3 else None
+        if not d_from or not d_to:
+            continue
+        if d_from > d_to:
+            d_from, d_to = d_to, d_from
+
+        od = _overlap_days(d_from, d_to, month_start, month_end)
+        if od > 0:
+            req_count += 1
+            total_days += od
+            details.append((d_from, d_to, od))
+
+    return req_count, total_days, details
 # ========= ROUTE =========
 @app.post("/")
 async def discord_interaction(
@@ -278,6 +354,50 @@ async def discord_interaction(
             return discord_response_message(
                 f"✅ Recorded: **{name}** — **{action}** at **{get_ist_timestamp()} IST**", ephemeral=True
             )
+        if cmd_name == "leavecount":
+            options = data.get("options", []) or []
+            # Optional explicit name; defaults to invoking user's name
+            explicit_name = None
+            for opt in options:
+                if opt.get("name") == "name":
+                    explicit_name = (opt.get("value") or "").strip()
+
+            member = payload.get("member", {}) or {}
+            user = member.get("user", {}) or payload.get("user", {}) or {}
+            fallback_name = user.get("global_name") or user.get("username") or "Unknown"
+            target_name = (explicit_name or fallback_name).strip()
+
+            try:
+                req_count, total_days, details = count_user_leaves_current_month(target_name)
+            except Exception as e:
+                return discord_response_message(
+                    f"❌ Could not read leave data. {type(e).__name__}: {e}", ephemeral=True
+                )
+
+            # Month label
+            now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+            month_label = now_ist.strftime("%B %Y")
+
+            if req_count == 0:
+                return discord_response_message(
+                    f"📊 **{target_name}** has **0** leave requests in **{month_label}**.", ephemeral=True
+                )
+
+            # Short per-request summary (max ~5 lines to keep it compact)
+            lines = []
+            for i, (df, dt, od) in enumerate(details[:5], 1):
+                lines.append(f"{i}. {df.isoformat()} → {dt.isoformat()} ({od} day{'s' if od!=1 else ''})")
+            extra = ""
+            if len(details) > 5:
+                extra = f"\n…and {len(details) - 5} more request(s)."
+
+            msg = (
+                f"📊 **{target_name}** in **{month_label}**\n"
+                f"• Requests overlapping this month: **{req_count}**\n"
+                f"• Total days in this month: **{total_days}**\n\n"
+                + "\n".join(lines) + extra
+            )
+            return discord_response_message(msg, ephemeral=True)
 
         # ----- LEAVE REQUEST -----
         if cmd_name == "leaverequest":
