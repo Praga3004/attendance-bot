@@ -33,6 +33,9 @@ BOT_TOKEN            = os.environ.get("BOT_TOKEN", "")
 APPROVER_CHANNEL_ID  = os.environ.get("APPROVER_CHANNEL_ID", "")
 APPROVER_USER_ID     = os.environ.get("APPROVER_USER_ID", "")
 LEAVE_STATUS_CHANNEL_ID = os.environ.get("LEAVE_STATUS_CHANNEL_ID", "")
+HR_ROLE_ID            = os.environ.get("HR_ROLE_ID", "")           # e.g. 123456789012345678
+ATTENDANCE_CHANNEL_ID = os.environ.get("ATTENDANCE_CHANNEL_ID", "")# optional fixed channel for attendance alerts
+
 
 # ========= HELPERS =========
 def verify_signature(signature: str, timestamp: str, body: bytes) -> bool:
@@ -80,6 +83,87 @@ def append_attendance_row(name: str, action: str) -> None:
         insertDataOption="INSERT_ROWS",
         body=body,
     ).execute()
+def broadcast_attendance(name: str, action: str, user_id: str, fallback_channel_id: str | None):
+    """
+    Sends a message that @mentions the HR role *and* the user who logged in/out.
+    Posts to ATTENDANCE_CHANNEL_ID if set, else to the interaction channel.
+    Also DMs the user for their own record.
+    """
+    bot_token = BOT_TOKEN.strip()
+    if not bot_token:
+        print("⚠️ No BOT_TOKEN; skipping attendance broadcast.")
+        return False
+
+    channel_id = (ATTENDANCE_CHANNEL_ID.strip() or (fallback_channel_id or "").strip())
+    if not channel_id:
+        print("⚠️ No channel to post attendance broadcast.")
+        return False
+
+    role_ping = f"<@&{HR_ROLE_ID.strip()}>" if HR_ROLE_ID.strip() else "HR"
+    user_ping = f"<@{user_id}>" if user_id else name
+    icon = "🟢" if action.lower() == "login" else "🔴"
+
+    content = (
+        f"{icon} **Attendance**\n"
+        f"👤 {user_ping} — **{name}**\n"
+        f"🕒 {get_ist_timestamp()} IST\n"
+        f"📝 Action: **{action}**\n"
+        f"{role_ping} please take note."
+    )
+
+    headers = {
+        "Authorization": f"Bot {bot_token}",
+        "Content-Type": "application/json",
+        "User-Agent": "DiscordBot (https://example.com, 1.0)",
+    }
+
+    # 1) Post in channel (mention HR role + user)
+    try:
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+        body = {
+            "content": content,
+            # ensure role & user pings deliver
+            "allowed_mentions": {
+                "parse": [],
+                "roles": [HR_ROLE_ID] if HR_ROLE_ID.strip() else [],
+                "users": [user_id] if user_id else [],
+            },
+        }
+        r = requests.post(url, headers=headers, json=body, timeout=15)
+        print(f"POST attendance broadcast -> {r.status_code} {r.text}")
+        r.raise_for_status()
+    except Exception as e:
+        print(f"❌ Failed to post attendance broadcast: {e}")
+
+    # 2) DM the user a receipt
+    try:
+        if user_id:
+            dm = requests.post(
+                "https://discord.com/api/v10/users/@me/channels",
+                headers=headers,
+                json={"recipient_id": user_id},
+                timeout=15,
+            )
+            print(f"Create DM for attendance -> {dm.status_code} {dm.text}")
+            dm.raise_for_status()
+            dm_ch = dm.json().get("id")
+            if dm_ch:
+                dm_msg = (
+                    f"{icon} Attendance recorded for **{name}**\n"
+                    f"🕒 {get_ist_timestamp()} IST\n"
+                    f"Action: **{action}**"
+                )
+                requests.post(
+                    f"https://discord.com/api/v10/channels/{dm_ch}/messages",
+                    headers=headers,
+                    json={"content": dm_msg},
+                    timeout=15,
+                )
+    except Exception as e:
+        print(f"⚠️ Failed to DM attendance receipt: {e}")
+
+    return True
+
 
 def append_leave_row(name: str, from_date: str, to_date: str, reason: str) -> None:
     if not SHEET_ID:
@@ -350,10 +434,15 @@ async def discord_interaction(
 
             try:
                 append_attendance_row(name=name, action=action)
+                # NEW: broadcast to HR + DM user
+                user_id = (user.get("id") or "").strip()
+                fallback_channel_id = payload.get("channel_id")
+                broadcast_attendance(name=name, action=action, user_id=user_id, fallback_channel_id=fallback_channel_id)
             except Exception as e:
                 return discord_response_message(
                     f"❌ Failed to record attendance. {type(e).__name__}: {e}", ephemeral=True
                 )
+
             return discord_response_message(
                 f"✅ Recorded: **{name}** — **{action}** at **{get_ist_timestamp()} IST**", ephemeral=True
             )
