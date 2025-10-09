@@ -245,7 +245,9 @@ async def discord_interaction(
 
             try:
                 append_leave_row(name=name, from_date=from_opt, to_date=to_opt, reason=reason_opt)
+                print("Leave Approval Called")
                 notify_approver(name, from_opt, to_opt, reason_opt)
+                print("Leave Approval sent")
             except Exception as e:
                 return discord_response_message(
                     f"❌ Failed to record leave. {type(e).__name__}: {str(e)}",
