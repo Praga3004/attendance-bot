@@ -418,21 +418,150 @@ async def discord_interaction(
                 }
             })
 
-        # Only handle our two buttons
-        if custom_id not in ("leave_approve", "leave_reject"):
-            return JSONResponse({"type": 4, "data": {"content": "Unsupported action.", "flags": 1 << 6}})
+        # ——— APPROVE: record immediately as before ———
+        if custom_id == "leave_approve":
+            decision = "Approved"
+            try:
+                append_leave_decision_row(
+                    name=req_name, from_date=from_str, to_date=to_str,
+                    reason=reason, decision=decision, reviewer=reviewer
+                )
+            except Exception as e:
+                return JSONResponse({
+                    "type": 4,
+                    "data": {"content": f"❌ Failed to record decision. {type(e).__name__}: {e}", "flags": 1 << 6}
+                })
 
-        decision = "Approved" if custom_id == "leave_approve" else "Rejected"
+            new_content = content + f"\n\n**Status:** {decision} by **{reviewer}** at **{get_ist_timestamp()} IST**"
+            disabled_components = [{
+                "type": 1,
+                "components": [
+                    {"type": 2, "style": 3, "label": "Approve", "custom_id": "leave_approve", "disabled": True},
+                    {"type": 2, "style": 4, "label": "Reject",  "custom_id": "leave_reject",  "disabled": True},
+                ]
+            }]
 
-        # Write decision to Google Sheets
+            # Public status broadcast
+            fallback_channel_id = payload.get("channel_id")
+            post_leave_status_update(
+                name=req_name, from_date=from_str, to_date=to_str, reason=reason,
+                decision=decision, reviewer=reviewer, fallback_channel_id=fallback_channel_id
+            )
+
+            return JSONResponse({"type": 7, "data": {"content": new_content, "components": disabled_components}})
+
+        # ——— REJECT: open a modal to collect reason ———
+        if custom_id == "leave_reject":
+            # encode channel + message id so we can edit the original after modal submit
+            ch_id = payload.get("channel_id", "")
+            msg_id = message.get("id", "")
+            modal_custom_id = f"reject_reason::{ch_id}::{msg_id}"
+            return JSONResponse({
+                "type": 9,  # MODAL
+                "data": {
+                    "custom_id": modal_custom_id,
+                    "title": "Reject Leave",
+                    "components": [
+                        {
+                            "type": 1,
+                            "components": [
+                                {
+                                    "type": 4,               # TEXT_INPUT
+                                    "custom_id": "reject_reason",
+                                    "style": 2,              # PARAGRAPH
+                                    "label": "Reason for rejection",
+                                    "min_length": 1,
+                                    "max_length": 1000,
+                                    "required": True,
+                                    "placeholder": "Enter the reason for rejection"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            })
+
+        # Unknown component
+        return JSONResponse({"type": 4, "data": {"content": "Unsupported action.", "flags": 1 << 6}})
+    if t == 4:  # APPLICATION_COMMAND_AUTOCOMPLETE
+        return JSONResponse({"type": 8, "data": {"choices": []}})
+    if t == 5:  # MODAL_SUBMIT
+        data = payload.get("data", {}) or {}
+        modal_custom_id = data.get("custom_id", "")  # "reject_reason::<channel_id>::<message_id>"
+        comps = data.get("components", []) or []
+        # Extract the text input value
+        reject_note = ""
+        try:
+            # components[0].components[0].value
+            reject_note = comps[0]["components"][0]["value"].strip()
+        except Exception:
+            reject_note = ""
+
+        # Parse channel/message ids from custom_id
+        ch_id = ""
+        msg_id = ""
+        parts = modal_custom_id.split("::")
+        if len(parts) == 3:
+            _, ch_id, msg_id = parts
+
+        # Fallback to payload channel if needed
+        ch_id = ch_id or payload.get("channel_id", "")
+
+        # Fetch the original message to parse fields and update it
+        bot_token = os.environ.get("BOT_TOKEN", "").strip()
+        if not (bot_token and ch_id and msg_id):
+            return JSONResponse({
+                "type": 4,
+                "data": {"content": "❌ Missing context to complete rejection.", "flags": 1 << 6}
+            })
+
+        headers = {
+            "Authorization": f"Bot {bot_token}",
+            "Content-Type": "application/json",
+            "User-Agent": "DiscordBot (https://example.com, 1.0)",
+        }
+
+        # 1) GET original message
+        get_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
+        r = requests.get(get_url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return JSONResponse({
+                "type": 4,
+                "data": {"content": f"❌ Could not load original message ({r.status_code}).", "flags": 1 << 6}
+            })
+        msg = r.json()
+        content = msg.get("content", "") or ""
+
+        # Parse fields back from content (same helpers as t==3)
+        def grab_between(prefix: str, text: str) -> str:
+            if prefix in text:
+                after = text.split(prefix, 1)[1]
+                return after.split("\n", 1)[0].strip()
+            return ""
+
+        first_line = (content.split("\n", 1)[0] if content else "").strip()
+        req_name = first_line
+        for marker in ["**Leave Request from ", "Leave Request from ", "📩 **Leave Request from "]:
+            if marker in req_name:
+                req_name = req_name.split(marker, 1)[1]
+                break
+        req_name = req_name.strip("* ").strip()
+
+        from_str = grab_between("**From:** ", content)
+        to_str   = grab_between("**To:** ", content)
+        req_reason = grab_between("**Reason:** ", content)
+
+        # Reviewer identity
+        member = payload.get("member", {}) or {}
+        user = member.get("user", {}) or payload.get("user", {}) or {}
+        reviewer = (user.get("global_name") or user.get("username") or "Unknown").strip()
+
+        # 2) Write decision to sheet (store the original request reason; rejection note is for Discord messages)
+        decision = "Rejected"
         try:
             append_leave_decision_row(
-                name=req_name,
-                from_date=from_str,
-                to_date=to_str,
-                reason=reason,
-                decision=decision,
-                reviewer=reviewer
+                name=req_name, from_date=from_str, to_date=to_str,
+                reason=req_reason, decision=decision, reviewer=reviewer
             )
         except Exception as e:
             return JSONResponse({
@@ -440,35 +569,38 @@ async def discord_interaction(
                 "data": {"content": f"❌ Failed to record decision. {type(e).__name__}: {e}", "flags": 1 << 6}
             })
 
-        # Update original message and disable buttons
+        # 3) Edit the original message to add status + disable buttons
         new_content = (
             content
             + f"\n\n**Status:** {decision} by **{reviewer}** at **{get_ist_timestamp()} IST**"
+            + (f"\n📝 **Rejection Note:** {reject_note}" if reject_note else "")
         )
         disabled_components = [{
-            "type": 1,  # action row
+            "type": 1,
             "components": [
                 {"type": 2, "style": 3, "label": "Approve", "custom_id": "leave_approve", "disabled": True},
                 {"type": 2, "style": 4, "label": "Reject",  "custom_id": "leave_reject",  "disabled": True},
             ]
         }]
 
-        # Post a status summary in the Leave Request channel (or fallback)
-        fallback_channel_id = payload.get("channel_id")
+        patch_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
+        pr = requests.patch(patch_url, headers=headers,
+                            json={"content": new_content, "components": disabled_components},
+                            timeout=15)
+        # Even if this fails, still acknowledge the modal submit to avoid “This interaction failed”
+        if pr.status_code not in (200, 201):
+            print(f"❌ Failed to edit message: {pr.status_code} {pr.text}")
+
+        # 4) Post public status summary in your leave channel
         post_leave_status_update(
-            name=req_name,
-            from_date=from_str,
-            to_date=to_str,
-            reason=reason,
-            decision=decision,
-            reviewer=reviewer,
-            fallback_channel_id=fallback_channel_id
+            name=req_name, from_date=from_str, to_date=to_str, reason=req_reason,
+            decision=decision, reviewer=reviewer, fallback_channel_id=ch_id
         )
 
-        # Return the updated card
-        return JSONResponse({"type": 7, "data": {"content": new_content, "components": disabled_components}})
-
-    if t == 4:  # APPLICATION_COMMAND_AUTOCOMPLETE
-        return JSONResponse({"type": 8, "data": {"choices": []}})
+        # 5) Ephemeral ack to the reviewer
+        return JSONResponse({
+            "type": 4,
+            "data": {"content": "✅ Rejection recorded.", "flags": 1 << 6}
+        })
 
     return discord_response_message("Unsupported interaction type.", ephemeral=True)
