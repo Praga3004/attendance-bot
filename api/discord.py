@@ -69,7 +69,63 @@ def get_service():
         ],
     )
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
+def get_ist_timestamp() -> str:
+    return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
 
+def today_ist_date() -> date:
+    return datetime.now(ZoneInfo("Asia/Kolkata")).date()
+
+
+def fetch_attendance_rows() -> list[list[str]]:
+    """Returns rows from 'Attendance'!A:C (including header if present)."""
+    service = get_service()
+    resp = service.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID,
+        range="Attendance!A:C"
+    ).execute()
+    return resp.get("values", []) or []
+
+def _ts_to_date_ist(ts_str: str) -> date | None:
+    """
+    Parse 'YYYY-MM-DD HH:MM:SS' (IST string we wrote) to date.
+    If format differs, try first 10 chars as YYYY-MM-DD.
+    """
+    if not ts_str:
+        return None
+    try:
+        return datetime.strptime(ts_str.strip()[:19], "%Y-%m-%d %H:%M:%S").date()
+    except Exception:
+        try:
+            return datetime.strptime(ts_str.strip()[:10], "%Y-%m-%d").date()
+        except Exception:
+            return None
+def get_today_actions_for_name(name: str) -> set[str]:
+    """
+    Scan Attendance sheet and return actions {'Login','Logout'} recorded today (IST) for this name.
+    """
+    rows = fetch_attendance_rows()
+    actions = set()
+    if not rows:
+        return actions
+
+    # If header likely exists, keep it simple and just iterate all rows safely.
+    today = today_ist_date()
+    for r in rows:
+        if len(r) < 3:
+            continue
+        ts, n, action = (r[0] or ""), (r[1] or ""), (r[2] or "")
+        if not n or not action:
+            continue
+        if n.strip().lower() != name.strip().lower():
+            continue
+        d = _ts_to_date_ist(ts)
+        if d == today:
+            a = action.strip().lower()
+            if a == "login":
+                actions.add("Login")
+            elif a == "logout":
+                actions.add("Logout")
+    return actions
 def append_attendance_row(name: str, action: str) -> None:
     if not SHEET_ID:
         raise RuntimeError("SHEET_ID env var missing")
@@ -83,6 +139,29 @@ def append_attendance_row(name: str, action: str) -> None:
         insertDataOption="INSERT_ROWS",
         body=body,
     ).execute()
+
+def record_attendance_auto(name: str) -> tuple[str | None, str]:
+    """
+    Decide what to do for today's attendance for 'name'.
+    Returns (action_taken, human_message).
+      - action_taken is 'Login' or 'Logout' when a row was added; None if ignored.
+    Logic:
+      - No entry today -> add Login
+      - Only Login exists -> add Logout
+      - Login & Logout exist -> ignore
+    """
+    acts = get_today_actions_for_name(name)
+    if "Login" in acts and "Logout" in acts:
+        return None, f"ℹ️ Already logged **Login** and **Logout** for today."
+    elif "Login" in acts:
+        # add Logout
+        append_attendance_row(name, "Logout")
+        return "Logout", f"✅ Recorded **Logout** for today."
+    else:
+        # no Login today yet => add Login
+        append_attendance_row(name, "Login")
+        return "Login", f"✅ Recorded **Login** for today."
+
 def broadcast_attendance(name: str, action: str, user_id: str, fallback_channel_id: str | None):
     """
     Sends a message that @mentions the HR role *and* the user who logged in/out.
@@ -122,7 +201,6 @@ def broadcast_attendance(name: str, action: str, user_id: str, fallback_channel_
         url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
         body = {
             "content": content,
-            # ensure role & user pings deliver
             "allowed_mentions": {
                 "parse": [],
                 "roles": [HR_ROLE_ID] if HR_ROLE_ID.strip() else [],
@@ -163,7 +241,6 @@ def broadcast_attendance(name: str, action: str, user_id: str, fallback_channel_
         print(f"⚠️ Failed to DM attendance receipt: {e}")
 
     return True
-
 
 def append_leave_row(name: str, from_date: str, to_date: str, reason: str) -> None:
     if not SHEET_ID:
@@ -419,77 +496,32 @@ async def discord_interaction(
         data = payload.get("data", {}) or {}
         cmd_name = data.get("name", "")
 
-        # ----- ATTENDANCE -----
+        # ----- ATTENDANCE (NO ARGUMENTS) -----
         if cmd_name == "attendance":
-            options = data.get("options", []) or []
-            action_opt = None
-            for opt in options:
-                if opt.get("name") == "action":
-                    action_opt = opt.get("value")
-
             member = payload.get("member", {}) or {}
             user = member.get("user", {}) or payload.get("user", {}) or {}
             name = (user.get("global_name") or user.get("username") or "Unknown").strip()
-            action = normalize_action(action_opt)
 
             try:
-                append_attendance_row(name=name, action=action)
-                # NEW: broadcast to HR + DM user
-                user_id = (user.get("id") or "").strip()
-                fallback_channel_id = payload.get("channel_id")
-                broadcast_attendance(name=name, action=action, user_id=user_id, fallback_channel_id=fallback_channel_id)
+                action_taken, info = record_attendance_auto(name=name)
+                # Only broadcast if we actually added a row
+                if action_taken is not None:
+                    user_id = (user.get("id") or "").strip()
+                    fallback_channel_id = payload.get("channel_id")
+                    broadcast_attendance(name=name, action=action_taken, user_id=user_id,
+                                         fallback_channel_id=fallback_channel_id)
             except Exception as e:
                 return discord_response_message(
                     f"❌ Failed to record attendance. {type(e).__name__}: {e}", ephemeral=True
                 )
 
+            # Ephemeral summary to invoker
+            stamp = get_ist_timestamp()
             return discord_response_message(
-                f"✅ Recorded: **{name}** — **{action}** at **{get_ist_timestamp()} IST**", ephemeral=True
+                f"{info}\n👤 **{name}** • 🕒 **{stamp} IST**",
+                ephemeral=True
             )
-        if cmd_name == "leavecount":
-            options = data.get("options", []) or []
-            # Optional explicit name; defaults to invoking user's name
-            explicit_name = None
-            for opt in options:
-                if opt.get("name") == "name":
-                    explicit_name = (opt.get("value") or "").strip()
 
-            member = payload.get("member", {}) or {}
-            user = member.get("user", {}) or payload.get("user", {}) or {}
-            fallback_name = user.get("global_name") or user.get("username") or "Unknown"
-            target_name = (explicit_name or fallback_name).strip()
-
-            try:
-                req_count, total_days, details = count_user_leaves_current_month(target_name)
-            except Exception as e:
-                return discord_response_message(
-                    f"❌ Could not read leave data. {type(e).__name__}: {e}", ephemeral=True
-                )
-
-            # Month label
-            now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
-            month_label = now_ist.strftime("%B %Y")
-
-            if req_count == 0:
-                return discord_response_message(
-                    f"📊 **{target_name}** has **0** leave requests in **{month_label}**.", ephemeral=True
-                )
-
-            # Short per-request summary (max ~5 lines to keep it compact)
-            lines = []
-            for i, (df, dt, od) in enumerate(details[:5], 1):
-                lines.append(f"{i}. {df.isoformat()} → {dt.isoformat()} ({od} day{'s' if od!=1 else ''})")
-            extra = ""
-            if len(details) > 5:
-                extra = f"\n…and {len(details) - 5} more request(s)."
-
-            msg = (
-                f"📊 **{target_name}** in **{month_label}**\n"
-                f"• Requests overlapping this month: **{req_count}**\n"
-                f"• Total days in this month: **{total_days}**\n\n"
-                + "\n".join(lines) + extra
-            )
-            return discord_response_message(msg, ephemeral=True)
 
         # ----- LEAVE REQUEST -----
         if cmd_name == "leaverequest":
