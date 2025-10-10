@@ -88,7 +88,22 @@ def _ts_to_date_ist(ts_str: str) -> date | None:
 
 def today_ist_date() -> date:
     return datetime.now(ZoneInfo("Asia/Kolkata")).date()
-
+def format_timestamp_column_as_datetime():
+    service = get_service()
+    req = {
+        "requests": [{
+            "repeatCell": {
+                "range": {"sheetId": 0, "startColumnIndex": 0, "endColumnIndex": 1},  # A:A on the first tab
+                "cell": {
+                    "userEnteredFormat": {
+                        "numberFormat": {"type": "DATE_TIME", "pattern": "yyyy-mm-dd HH:mm:ss"}
+                    }
+                },
+                "fields": "userEnteredFormat.numberFormat"
+            }
+        }]
+    }
+    service.spreadsheets().batchUpdate(spreadsheetId=SHEET_ID, body=req).execute()
 def get_today_actions_for_name(name: str) -> set[str]:
     """
     Scan Attendance sheet and return actions {'Login','Logout'} recorded today (IST) for this name.
@@ -118,15 +133,13 @@ def get_today_actions_for_name(name: str) -> set[str]:
     return actions
 
 def append_attendance_row(name: str, action: str) -> None:
-    if not SHEET_ID:
-        raise RuntimeError("SHEET_ID env var missing")
     service = get_service()
-    values = [[get_ist_timestamp(), name, action]]
+    values = [[get_ist_timestamp(), name, action]]   # this is a string like "2025-10-10 10:34:50"
     body = {"values": values}
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
         range=SHEET_RANGE,
-        valueInputOption="USER_ENTERED",
+        valueInputOption="USER_ENTERED",  # fine; will stay as text unless column is date-formatted
         insertDataOption="INSERT_ROWS",
         body=body,
     ).execute()
