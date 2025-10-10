@@ -364,7 +364,72 @@ def notify_approver(name: str, from_date: str, to_date: str, reason: str,
     except Exception as e:
         print(f"❌ Unexpected error while notifying approver: {e}")
         return False
+def append_wfh_row(name: str, day: str, reason: str) -> None:
+    """Write a WFH request to 'WFH Requests' (A:ts, B:name, C:date, D:reason)."""
+    if not SHEET_ID:
+        raise RuntimeError("SHEET_ID env var missing")
+    service = get_service()
+    values = [[get_ist_timestamp(), name, day, reason]]
+    body = {"values": values}
+    service.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID,
+        range="'WFH Requests'!A:D",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body=body,
+    ).execute()
 
+def append_wfh_decision_row(name: str, day: str, reason: str,
+                            decision: str, reviewer: str, note: str = "") -> None:
+    """Write a WFH approval decision to 'WFH Decisions' (A:ts, B:name, C:date, D:reason, E:decision, F:reviewer, G:note)."""
+    if not SHEET_ID:
+        raise RuntimeError("SHEET_ID env var missing")
+    service = get_service()
+    values = [[get_ist_timestamp(), name, day, reason, decision, reviewer, note]]
+    body = {"values": values}
+    service.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID,
+        range="'WFH Decisions'!A:G",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body=body,
+    ).execute()
+
+def post_wfh_status_update(name: str, day: str, reason: str,
+                           decision: str, reviewer: str, fallback_channel_id: str | None):
+    """Broadcast final WFH decision to a status channel (or fallback)."""
+    bot_token = BOT_TOKEN.strip()
+    status_channel_id = (LEAVE_STATUS_CHANNEL_ID.strip()
+                         or APPROVER_CHANNEL_ID.strip()
+                         or (fallback_channel_id or "").strip())
+    if not bot_token or not status_channel_id:
+        print("⚠️ Skipping WFH status post (missing BOT_TOKEN or channel id).")
+        return False
+    icon = "🏠✅" if decision.lower() == "approved" else "🏠❌"
+    content = (
+        f"{icon} **WFH {decision}**\n"
+        f"👤 **Employee:** {name}\n"
+        f"📅 **Date:** {day}\n"
+        f"💬 **Reason:** {reason}\n"
+        f"🧑‍💼 **Reviewer:** {reviewer} — **{get_ist_timestamp()} IST**"
+    )
+    headers = {
+        "Authorization": f"Bot {bot_token}",
+        "Content-Type": "application/json",
+        "User-Agent": "DiscordBot (https://example.com, 1.0)",
+    }
+    url = f"https://discord.com/api/v10/channels/{status_channel_id}/messages"
+    try:
+        r = requests.post(url, headers=headers, json={"content": content}, timeout=15)
+        print(f"POST WFH status -> {r.status_code} {r.text}")
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"❌ Failed to post WFH status update: {e}")
+        return False
+
+
+    return JSONResponse({"type": 4, "data": data})  # CHANNEL_MESSAGE_WITH_SOURCE
 def discord_response_message(content: str, ephemeral: bool = True) -> JSONResponse:
     data = {"content": content}
     if ephemeral:
@@ -520,7 +585,82 @@ async def discord_interaction(
                 + "\n".join(lines) + extra
             )
             return discord_response_message(msg, ephemeral=True)
+        if cmd_name == "wfh":
+            # Options: date (required), reason (optional)
+            options = data.get("options", []) or []
+            day = reason = None
+            for opt in options:
+                n = opt.get("name")
+                if n == "date":
+                    day = (opt.get("value") or "").strip()
+                elif n == "reason":
+                    reason = (opt.get("value") or "").strip()
+            member = payload.get("member", {}) or {}
+            user = member.get("user", {}) or payload.get("user", {}) or {}
+            name = (user.get("global_name") or user.get("username") or "Unknown").strip()
+            if not day:
+                return discord_response_message("❌ Please provide a date (YYYY-MM-DD).", ephemeral=True)
 
+            # 1) Log request
+            try:
+                append_wfh_row(name=name, day=day, reason=reason or "")
+            except Exception as e:
+                return discord_response_message(
+                    f"❌ Failed to record WFH request. {type(e).__name__}: {e}", ephemeral=True
+                )
+
+            # 2) Notify approver channel/DM with Approve/Reject buttons
+            bot_token = BOT_TOKEN.strip()
+            if bot_token:
+                content = (
+                    f"🏠 **WFH Request from {name}**\n"
+                    f"📅 **Date:** {day}\n"
+                    f"💬 **Reason:** {reason or '(not provided)'}\n\n"
+                    f"Please review and respond accordingly."
+                )
+                components = [{
+                    "type": 1,
+                    "components": [
+                        {"type": 2, "style": 3, "label": "Approve", "custom_id": "wfh_approve"},
+                        {"type": 2, "style": 4, "label": "Reject",  "custom_id": "wfh_reject" }
+                    ]
+                }]
+                headers = {
+                    "Authorization": f"Bot {bot_token}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "DiscordBot (https://example.com, 1.0)",
+                }
+                def post_to_channel(cid: str) -> None:
+                    url = f"https://discord.com/api/v10/channels/{cid}/messages"
+                    r = requests.post(url, headers=headers, json={"content": content, "components": components}, timeout=15)
+                    print(f"POST WFH notify -> {r.status_code} {r.text}")
+                    r.raise_for_status()
+                try:
+                    if APPROVER_CHANNEL_ID.strip():
+                        post_to_channel(APPROVER_CHANNEL_ID.strip())
+                    elif APPROVER_USER_ID.strip():
+                        dm = requests.post(
+                            "https://discord.com/api/v10/users/@me/channels",
+                            headers=headers, json={"recipient_id": APPROVER_USER_ID.strip()}, timeout=15
+                        )
+                        print(f"Create DM (WFH) -> {dm.status_code} {dm.text}")
+                        dm.raise_for_status()
+                        dm_ch = dm.json().get("id")
+                        if dm_ch:
+                            post_to_channel(dm_ch)
+                    else:
+                        # fallback to current channel
+                        ch_id = payload.get("channel_id")
+                        if ch_id:
+                            post_to_channel(ch_id)
+                except Exception as e:
+                    print(f"⚠️ Could not notify approver for WFH: {e}")
+
+            # 3) Ephemeral ack
+            return discord_response_message(
+                f"✅ WFH request submitted for **{day}**.\nReason: {reason or '(not provided)'}",
+                ephemeral=True
+            )
         if cmd_name == "leaverequest":
             options = data.get("options", []) or []
             name = from_opt = to_opt = reason_opt = None
