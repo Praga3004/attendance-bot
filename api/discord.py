@@ -491,6 +491,8 @@ async def discord_interaction(
             if opt.get("focused"):
                 focused = opt
                 break
+
+        # --- /wfh date autocomplete (you already have this) ---
         if cmd_name == "wfh" and focused and focused.get("name") == "date":
             now_ist = today_ist_date()
             choices = []
@@ -499,6 +501,40 @@ async def discord_interaction(
                 label = f"{d.isoformat()} ({d.strftime('%a')})"
                 choices.append({"name": label, "value": d.isoformat()})
             return JSONResponse({"type": 8, "data": {"choices": choices}})
+
+        # --- /leaverequest from/to autocomplete (NEW) ---
+        if cmd_name == "leaverequest" and focused:
+            # figure out which field is focused
+            fname = focused.get("name")
+            # helper to convert option list to dict {name: value}
+            opts_map = {o.get("name"): (o.get("value") or "") for o in (data.get("options") or [])}
+
+            if fname == "from":
+                # next 25 days from today
+                start = today_ist_date()
+                choices = []
+                for i in range(25):
+                    d = start + timedelta(days=i)
+                    label = f"{d.isoformat()} ({d.strftime('%a')})"
+                    choices.append({"name": label, "value": d.isoformat()})
+                return JSONResponse({"type": 8, "data": {"choices": choices}})
+
+            if fname == "to":
+                # strictly after 'from' if provided, else tomorrow
+                from_str = (opts_map.get("from") or "").strip()
+                try:
+                    from_dt = datetime.strptime(from_str, "%Y-%m-%d").date() if from_str else today_ist_date()
+                except Exception:
+                    from_dt = today_ist_date()
+                start = from_dt + timedelta(days=1)
+                choices = []
+                for i in range(25):
+                    d = start + timedelta(days=i)
+                    label = f"{d.isoformat()} ({d.strftime('%a')})"
+                    choices.append({"name": label, "value": d.isoformat()})
+                return JSONResponse({"type": 8, "data": {"choices": choices}})
+
+        # default: no choices
         return JSONResponse({"type": 8, "data": {"choices": []}})
 
     # 2) APPLICATION_COMMAND
