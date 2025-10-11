@@ -1055,9 +1055,62 @@ async def discord_interaction(
                 decision=decision, reviewer=reviewer, fallback_channel_id=ch_id
             )
             return JSONResponse({"type": 4, "data": {"content": "✅ WFH rejection recorded.", "flags": 1 << 6}})
+        if modal_custom_id.startswith("leave_reason::"):
+            # Parse dates from modal id
+            _, from_date, to_date = (modal_custom_id.split("::") + ["", "", ""])[:3]
+            comps = data.get("components", []) or []
+            reason_text = ""
+            try:
+                reason_text = comps[0]["components"][0]["value"].strip()
+            except Exception:
+                pass
 
-        # Unknown modal
-        return JSONResponse({"type": 4, "data": {"content": "Unsupported modal.", "flags": 1 << 6}})
+            # Invoker name
+            member = payload.get("member", {}) or {}
+            user = member.get("user", {}) or payload.get("user", {}) or {}
+            name = (user.get("global_name") or user.get("username") or "Unknown").strip()
+
+            # Write + notify
+            try:
+                append_leave_row(name=name, from_date=from_date, to_date=to_date, reason=reason_text or "")
+                # Notify approver with buttons (same pattern you already use)
+                bot_token = BOT_TOKEN.strip()
+                if bot_token:
+                    content = (
+                        f"📩 **Leave Request from {name}**\n"
+                        f"🗓️ **From:** {from_date}\n"
+                        f"🗓️ **To:** {to_date}\n"
+                        f"💬 **Reason:** {reason_text or '(not provided)'}\n\n"
+                        f"Please review and respond accordingly."
+                    )
+                    components = [{
+                        "type": 1,
+                        "components": [
+                            {"type": 2, "style": 3, "label": "Approve", "custom_id": "leave_approve"},
+                            {"type": 2, "style": 4, "label": "Reject",  "custom_id": "leave_reject"}
+                        ]
+                    }]
+                    headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+                    def post_to_channel(cid: str):
+                        url = f"https://discord.com/api/v10/channels/{cid}/messages"
+                        r = requests.post(url, headers=headers, json={"content": content, "components": components}, timeout=15)
+                        r.raise_for_status()
+                    if APPROVER_CHANNEL_ID.strip():
+                        post_to_channel(APPROVER_CHANNEL_ID.strip())
+                    elif APPROVER_USER_ID.strip():
+                        dm = requests.post("https://discord.com/api/v10/users/@me/channels",
+                                        headers=headers, json={"recipient_id": APPROVER_USER_ID.strip()}, timeout=15)
+                        dm.raise_for_status()
+                        dm_ch = dm.json().get("id")
+                        if dm_ch: post_to_channel(dm_ch)
+                    else:
+                        ch_id = payload.get("channel_id")
+                        if ch_id: post_to_channel(ch_id)
+            except Exception as e:
+                return JSONResponse({"type": 4, "data": {"content": f"❌ Failed to record leave. {type(e).__name__}: {e}", "flags": 1 << 6}})
+
+            return JSONResponse({"type": 4, "data": {"content": f"✅ Leave requested for **{from_date} → {to_date}**.", "flags": 1 << 6}})
+
 
     # Fallback
     return discord_response_message("Unsupported interaction type.", True)
