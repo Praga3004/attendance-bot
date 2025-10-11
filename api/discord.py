@@ -854,10 +854,10 @@ async def discord_interaction(
                 return JSONResponse({"type": 4, "data": {"content": "❌ No start date selected.", "flags": 1 << 6}})
 
             from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
-            to_start = from_dt + timedelta(days=1)
+            to_start = from_dt 
 
             # ≤ 25
-            to_opts = _date_opts(to_start-1, 25)
+            to_opts = _date_opts(to_start, 25)
             print(f"[leave_to_picker] from={from_date} options={len(to_opts)} first={to_opts[0] if to_opts else None}")
 
             return JSONResponse({
