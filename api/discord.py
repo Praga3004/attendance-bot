@@ -369,10 +369,6 @@ def post_wfh_status_update(name: str, day: str, reason: str,
     except Exception as e:
         print(f"❌ WFH status post failed: {e}")
         return False
-def _date_opts(start: date, days: int) -> list[dict]:
-    """Build select options for `days` from start (inclusive)."""
-    return [{"label": f"{(start + timedelta(i)).isoformat()} ({(start + timedelta(i)).strftime('%a')})",
-             "value": (start + timedelta(i)).isoformat()} for i in range(days)]
 
 def send_leave_from_picker(channel_id: str) -> bool:
     bot_token = BOT_TOKEN.strip()
