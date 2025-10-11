@@ -857,7 +857,7 @@ async def discord_interaction(
             to_start = from_dt + timedelta(days=1)
 
             # ≤ 25
-            to_opts = _date_opts(to_start, 25)
+            to_opts = _date_opts(to_start-1, 25)
             print(f"[leave_to_picker] from={from_date} options={len(to_opts)} first={to_opts[0] if to_opts else None}")
 
             return JSONResponse({
