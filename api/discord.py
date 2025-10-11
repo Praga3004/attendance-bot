@@ -375,14 +375,15 @@ def _date_opts(start: date, days: int) -> list[dict]:
              "value": (start + timedelta(i)).isoformat()} for i in range(days)]
 
 def send_leave_from_picker(channel_id: str) -> bool:
-    """Post a 'From' date pick message (next 90 days)."""
     bot_token = BOT_TOKEN.strip()
     if not (bot_token and channel_id):
         return False
+
+    # ≤ 25 options or Discord will ignore them
     opts = _date_opts(today_ist_date(), 25)
 
-# To picker: strictly after “from”, up to 25 days
-    
+    print(f"[leave_from_picker] options={len(opts)} first={opts[0] if opts else None}")
+
     body = {
         "content": "📅 Pick the **start** date for your leave:",
         "components": [{
@@ -402,7 +403,6 @@ def send_leave_from_picker(channel_id: str) -> bool:
     print(f"POST leave_from_picker -> {r.status_code} {r.text}")
     r.raise_for_status()
     return True
-
 
 def send_wfh_date_picker(channel_id: str):
     """Shows a string select with next 14 days."""
@@ -821,21 +821,22 @@ async def discord_interaction(
             if not from_date:
                 return JSONResponse({"type": 4, "data": {"content": "❌ No start date selected.", "flags": 1 << 6}})
 
-            # To must be strictly after From
             from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
-            to_start = from_dt + timedelta(days=1)     # strictly after
-            to_opts = _date_opts(to_start, 25)         # allow up to 60 days after
+            to_start = from_dt + timedelta(days=1)
 
-            # Replace message with the TO picker
+            # ≤ 25
+            to_opts = _date_opts(to_start, 25)
+            print(f"[leave_to_picker] from={from_date} options={len(to_opts)} first={to_opts[0] if to_opts else None}")
+
             return JSONResponse({
-                "type": 7,  # CHANNEL_MESSAGE_EDIT
+                "type": 7,  # UPDATE_MESSAGE
                 "data": {
                     "content": f"📅 From: **{from_date}**\nNow pick the **end** date:",
                     "components": [{
                         "type": 1,
                         "components": [{
                             "type": 3,
-                            "custom_id": f"leave_to_select::{from_date}",  # embed from date
+                            "custom_id": f"leave_to_select::{from_date}",
                             "placeholder": "Select end date (To)",
                             "min_values": 1, "max_values": 1,
                             "options": to_opts
@@ -843,6 +844,7 @@ async def discord_interaction(
                     }]
                 }
             })
+
 
         if custom_id.startswith("leave_to_select::"):
             # Extract from date from custom_id
