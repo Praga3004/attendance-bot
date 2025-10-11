@@ -31,7 +31,12 @@ APPROVER_USER_ID        = os.environ.get("APPROVER_USER_ID", "")
 LEAVE_STATUS_CHANNEL_ID = os.environ.get("LEAVE_STATUS_CHANNEL_ID", "")
 HR_ROLE_ID              = os.environ.get("HR_ROLE_ID", "")
 ATTENDANCE_CHANNEL_ID   = os.environ.get("ATTENDANCE_CHANNEL_ID", "")
-
+def _date_opts(start: date, days: int) -> list[dict]:
+    days = max(0, min(days, 25))  # Discord limit
+    return [{
+        "label": f"{(start + timedelta(i)).isoformat()} ({(start + timedelta(i)).strftime('%a')})",
+        "value": (start + timedelta(i)).isoformat()
+    } for i in range(days)]
 # ========= CORE HELPERS =========
 def verify_signature(signature: str, timestamp: str, body: bytes) -> bool:
     if not DISCORD_PUBLIC_KEY:
@@ -374,7 +379,10 @@ def send_leave_from_picker(channel_id: str) -> bool:
     bot_token = BOT_TOKEN.strip()
     if not (bot_token and channel_id):
         return False
-    opts = _date_opts(today_ist_date(), 90)
+    opts = _date_opts(today_ist_date(), 25)
+
+# To picker: strictly after “from”, up to 25 days
+    
     body = {
         "content": "📅 Pick the **start** date for your leave:",
         "components": [{
@@ -816,7 +824,7 @@ async def discord_interaction(
             # To must be strictly after From
             from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
             to_start = from_dt + timedelta(days=1)     # strictly after
-            to_opts = _date_opts(to_start, 60)         # allow up to 60 days after
+            to_opts = _date_opts(to_start, 25)         # allow up to 60 days after
 
             # Replace message with the TO picker
             return JSONResponse({
