@@ -364,6 +364,37 @@ def post_wfh_status_update(name: str, day: str, reason: str,
     except Exception as e:
         print(f"❌ WFH status post failed: {e}")
         return False
+def _date_opts(start: date, days: int) -> list[dict]:
+    """Build select options for `days` from start (inclusive)."""
+    return [{"label": f"{(start + timedelta(i)).isoformat()} ({(start + timedelta(i)).strftime('%a')})",
+             "value": (start + timedelta(i)).isoformat()} for i in range(days)]
+
+def send_leave_from_picker(channel_id: str) -> bool:
+    """Post a 'From' date pick message (next 90 days)."""
+    bot_token = BOT_TOKEN.strip()
+    if not (bot_token and channel_id):
+        return False
+    opts = _date_opts(today_ist_date(), 90)
+    body = {
+        "content": "📅 Pick the **start** date for your leave:",
+        "components": [{
+            "type": 1,
+            "components": [{
+                "type": 3,  # STRING_SELECT
+                "custom_id": "leave_from_select",
+                "placeholder": "Select start date (From)",
+                "min_values": 1, "max_values": 1,
+                "options": opts
+            }]
+        }]
+    }
+    headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    r = requests.post(url, headers=headers, json=body, timeout=15)
+    print(f"POST leave_from_picker -> {r.status_code} {r.text}")
+    r.raise_for_status()
+    return True
+
 
 def send_wfh_date_picker(channel_id: str):
     """Shows a string select with next 14 days."""
@@ -521,17 +552,26 @@ async def discord_interaction(
         # ----- LEAVE REQUEST -----
         if cmd_name == "leaverequest":
             options = data.get("options", []) or []
-            name = from_opt = to_opt = reason_opt = None
+            from_opt = to_opt = reason_opt = None
             for opt in options:
                 n = opt.get("name")
-                if n == "name":   name = opt.get("value")
-                elif n == "from": from_opt = opt.get("value")
-                elif n == "to":   to_opt = opt.get("value")
-                elif n == "reason": reason_opt = opt.get("value")
+                if n == "from": from_opt = (opt.get("value") or "").strip()
+                elif n == "to": to_opt = (opt.get("value") or "").strip()
+                elif n == "reason": reason_opt = (opt.get("value") or "").strip()
+
             member = payload.get("member", {}) or {}
             user = member.get("user", {}) or payload.get("user", {}) or {}
-            fallback_name = user.get("global_name") or user.get("username") or "Unknown"
-            name = (name or fallback_name).strip()
+            name = (user.get("global_name") or user.get("username") or "Unknown").strip()
+
+            # If from/to not provided -> show pickers flow
+            if not from_opt or not to_opt:
+                ch_id = payload.get("channel_id")
+                if ch_id:
+                    send_leave_from_picker(ch_id)
+                return discord_response_message(
+                    "🗓️ I posted a **From date** picker. Choose From first; I’ll then show valid **To** dates.",
+                    True
+                )
             try:
                 append_leave_row(name=name, from_date=from_opt, to_date=to_opt, reason=reason_opt or "")
                 channel_id_from_payload = payload.get("channel_id")
@@ -569,6 +609,7 @@ async def discord_interaction(
                         post_to_channel(channel_id_from_payload)
             except Exception as e:
                 return discord_response_message(f"❌ Failed to record leave. {type(e).__name__}: {e}", True)
+
             return discord_response_message(
                 f"✅ Leave request submitted by **{name}** from **{from_opt}** to **{to_opt}**.\nReason: {reason_opt or '(not provided)'}",
                 True
