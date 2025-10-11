@@ -614,6 +614,64 @@ async def discord_interaction(
                 f"✅ Leave request submitted by **{name}** from **{from_opt}** to **{to_opt}**.\nReason: {reason_opt or '(not provided)'}",
                 True
             )
+        if custom_id == "leave_from_select":
+            values = data.get("values") or []
+            from_date = values[0] if values else None
+            if not from_date:
+                return JSONResponse({"type": 4, "data": {"content": "❌ No start date selected.", "flags": 1 << 6}})
+
+            # To must be strictly after From
+            from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
+            to_start = from_dt + timedelta(days=1)     # strictly after
+            to_opts = _date_opts(to_start, 60)         # allow up to 60 days after
+
+            # Replace message with the TO picker
+            return JSONResponse({
+                "type": 7,  # CHANNEL_MESSAGE_EDIT
+                "data": {
+                    "content": f"📅 From: **{from_date}**\nNow pick the **end** date:",
+                    "components": [{
+                        "type": 1,
+                        "components": [{
+                            "type": 3,
+                            "custom_id": f"leave_to_select::{from_date}",  # embed from date
+                            "placeholder": "Select end date (To)",
+                            "min_values": 1, "max_values": 1,
+                            "options": to_opts
+                        }]
+                    }]
+                }
+            })
+
+        if custom_id.startswith("leave_to_select::"):
+            # Extract from date from custom_id
+            _, from_date = custom_id.split("::", 1)
+            values = data.get("values") or []
+            to_date = values[0] if values else None
+            if not to_date:
+                return JSONResponse({"type": 4, "data": {"content": "❌ No end date selected.", "flags": 1 << 6}})
+
+            # pop a modal to collect reason
+            modal_custom_id = f"leave_reason::{from_date}::{to_date}"
+            return JSONResponse({
+                "type": 9,  # MODAL
+                "data": {
+                    "custom_id": modal_custom_id,
+                    "title": "Leave Reason",
+                    "components": [{
+                        "type": 1,
+                        "components": [{
+                            "type": 4,  # TEXT_INPUT
+                            "custom_id": "leave_reason_text",
+                            "style": 2,  # PARAGRAPH
+                            "label": "Reason (optional)",
+                            "required": False,
+                            "max_length": 1000,
+                            "placeholder": "Why are you requesting this leave?"
+                        }]
+                    }]
+                }
+            })
 
         # ----- WFH -----
         if cmd_name == "wfh":
