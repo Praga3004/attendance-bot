@@ -520,19 +520,19 @@ async def discord_interaction(
                 return JSONResponse({"type": 8, "data": {"choices": choices}})
 
             if fname == "to":
-                # strictly after 'from' if provided, else tomorrow
                 from_str = (opts_map.get("from") or "").strip()
                 try:
                     from_dt = datetime.strptime(from_str, "%Y-%m-%d").date() if from_str else today_ist_date()
                 except Exception:
                     from_dt = today_ist_date()
-                start = from_dt + timedelta(days=1)
+                start = from_dt  # allow same-day end date
                 choices = []
                 for i in range(25):
                     d = start + timedelta(days=i)
                     label = f"{d.isoformat()} ({d.strftime('%a')})"
                     choices.append({"name": label, "value": d.isoformat()})
                 return JSONResponse({"type": 8, "data": {"choices": choices}})
+
 
         # default: no choices
         return JSONResponse({"type": 8, "data": {"choices": []}})
