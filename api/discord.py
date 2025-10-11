@@ -428,8 +428,97 @@ def post_wfh_status_update(name: str, day: str, reason: str,
         print(f"❌ Failed to post WFH status update: {e}")
         return False
 
+# ---------- WFH HELPERS ----------
 
-    return JSONResponse({"type": 4, "data": data})  # CHANNEL_MESSAGE_WITH_SOURCE
+def append_wfh_request_row(name: str, date_str: str, time_str: str, reason: str) -> None:
+    """If you already write WFH requests elsewhere, you can skip this.
+       Kept here for symmetry: 'WFH Requests'!A:D => [ts, name, date, time, reason]"""
+    service = get_service()
+    values = [[get_ist_timestamp(), name, date_str, time_str, reason]]
+    body = {"values": values}
+    service.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID,
+        range="'WFH Requests'!A:E",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body=body,
+    ).execute()
+
+def append_wfh_decision_row(name: str, date_str: str, time_str: str, reason: str,
+                            decision: str, reviewer: str) -> None:
+    """Record approver’s decision: 'WFH Decisions'!A:G => [ts, name, date, time, reason, decision, reviewer]"""
+    service = get_service()
+    values = [[get_ist_timestamp(), name, date_str, time_str, reason, decision, reviewer]]
+    body = {"values": values}
+    service.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID,
+        range="'WFH Decisions'!A:G",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body=body,
+    ).execute()
+
+def post_wfh_status_update(name: str, date_str: str, time_str: str, reason: str,
+                           decision: str, reviewer: str, fallback_channel_id: str | None):
+    """Broadcast WFH status to LEAVE_STATUS_CHANNEL_ID/APPROVER_CHANNEL_ID/fallback."""
+    bot_token = BOT_TOKEN.strip()
+    status_channel_id = (LEAVE_STATUS_CHANNEL_ID.strip()
+                         or APPROVER_CHANNEL_ID.strip()
+                         or (fallback_channel_id or "").strip())
+    if not bot_token or not status_channel_id:
+        print("⚠️ Skipping WFH status post (missing BOT_TOKEN or channel).")
+        return False
+
+    icon = "✅" if decision.lower() == "approved" else "❌"
+    content = (
+        f"{icon} **WFH {decision}**\n"
+        f"👤 **Employee:** {name}\n"
+        f"📅 **Date:** {date_str}\n"
+        f"⏰ **Time:** {time_str}\n"
+        f"💬 **Reason:** {reason}\n"
+        f"🧑‍💼 **Reviewer:** {reviewer} — **{get_ist_timestamp()} IST**"
+    )
+
+    headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+    url = f"https://discord.com/api/v10/channels/{status_channel_id}/messages"
+    try:
+        r = requests.post(url, headers=headers, json={"content": content}, timeout=15)
+        print(f"POST WFH status -> {r.status_code} {r.text}")
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"❌ Failed to post WFH status: {e}")
+        return False
+
+def _grab_between(prefix: str, text: str) -> str:
+    if prefix in text:
+        after = text.split(prefix, 1)[1]
+        return after.split("\n", 1)[0].strip()
+    return ""
+
+def parse_wfh_card(content: str) -> tuple[str, str, str, str]:
+    """
+    Parses a WFH request card text you posted earlier, expected lines like:
+    '🏠 **WFH Request from Alice**'
+    '📅 **Date:** 2025-10-11'
+    '⏰ **Time:** 10:00–18:00'
+    '💬 **Reason:** Internet installation'
+    Returns: (name, date_str, time_str, reason)
+    """
+    # First line
+    first = (content.split("\n", 1)[0] if content else "").strip()
+    name = first
+    for m in ["**WFH Request from ", "WFH Request from ", "🏠 **WFH Request from "]:
+        if m in name:
+            name = name.split(m, 1)[1]
+            break
+    name = name.strip("* ").strip()
+
+    date_str = _grab_between("**Date:** ", content) or _grab_between("Date:", content)
+    time_str = _grab_between("**Time:** ", content) or _grab_between("Time:", content)
+    reason   = _grab_between("**Reason:** ", content) or _grab_between("Reason:", content)
+    return name, date_str, time_str, reason
+
 def discord_response_message(content: str, ephemeral: bool = True) -> JSONResponse:
     data = {"content": content}
     if ephemeral:
@@ -809,6 +898,62 @@ async def discord_interaction(
                     ]
                 }
             })
+        if custom_id == "wfh_approve":
+            name, date_str, time_str, wfh_reason = parse_wfh_card(content)
+            if not (name and date_str):
+                return JSONResponse({"type": 4, "data": {"content": "❌ Could not parse WFH request.", "flags": 1 << 6}})
+
+            decision = "Approved"
+            try:
+                append_wfh_decision_row(name, date_str, time_str, wfh_reason, decision, reviewer)
+            except Exception as e:
+                return JSONResponse({"type": 4, "data": {"content": f"❌ Failed to record WFH decision. {type(e).__name__}: {e}", "flags": 1 << 6}})
+
+            # Update the original card & disable buttons
+            new_content = content + f"\n\n**Status:** {decision} by **{reviewer}** at **{get_ist_timestamp()} IST**"
+            disabled_components = [{
+                "type": 1,
+                "components": [
+                    {"type": 2, "style": 3, "label": "Approve", "custom_id": "wfh_approve", "disabled": True},
+                    {"type": 2, "style": 4, "label": "Reject",  "custom_id": "wfh_reject",  "disabled": True},
+                ]
+            }]
+            # Echo status channel
+            post_wfh_status_update(
+                name=name, date_str=date_str, time_str=time_str, reason=wfh_reason,
+                decision=decision, reviewer=reviewer, fallback_channel_id=payload.get("channel_id")
+            )
+            return JSONResponse({"type": 7, "data": {"content": new_content, "components": disabled_components}})
+
+        # WFH REJECT -> open modal to collect note
+        if custom_id == "wfh_reject":
+            ch_id  = payload.get("channel_id", "")
+            msg_id = message.get("id", "")
+            modal_custom_id = f"wfh_reject_reason::{ch_id}::{msg_id}"
+            return JSONResponse({
+                "type": 9,  # MODAL
+                "data": {
+                    "custom_id": modal_custom_id,
+                    "title": "Reject WFH",
+                    "components": [
+                        {
+                            "type": 1,
+                            "components": [
+                                {
+                                    "type": 4,  # TEXT_INPUT
+                                    "custom_id": "reject_reason",
+                                    "style": 2,  # PARAGRAPH
+                                    "label": "Reason for rejection",
+                                    "min_length": 1,
+                                    "max_length": 1000,
+                                    "required": True,
+                                    "placeholder": "Enter the reason for rejection"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            })
 
         # If you later add more buttons (e.g., WFH approve), handle them here by custom_id.
         # Fallback: show which custom_id was clicked to aid debugging (ephemeral).
@@ -917,8 +1062,71 @@ async def discord_interaction(
             fallback_channel_id=ch_id
         )
 
-        # Ephemeral ack to the reviewer
-        return JSONResponse({"type": 4, "data": {"content": "✅ Rejection recorded.", "flags": 1 << 6}})
+        if modal_custom_id.startswith("wfh_reject_reason::"):
+            comps = data.get("components", []) or []
+            reject_note = ""
+            try:
+                reject_note = comps[0]["components"][0]["value"].strip()
+            except Exception:
+                pass
+
+            # Parse channel/message ids
+            _, ch_id, msg_id = (modal_custom_id.split("::") + ["", "", ""])[:3]
+            ch_id = ch_id or payload.get("channel_id", "")
+            bot_token = BOT_TOKEN.strip()
+            if not (bot_token and ch_id and msg_id):
+                return JSONResponse({"type": 4, "data": {"content": "❌ Missing context to complete WFH rejection.", "flags": 1 << 6}})
+
+            headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+            # Load original message to parse details
+            get_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
+            r = requests.get(get_url, headers=headers, timeout=15)
+            if r.status_code != 200:
+                return JSONResponse({"type": 4, "data": {"content": f"❌ Could not load original WFH message ({r.status_code}).", "flags": 1 << 6}})
+            msg = r.json()
+            content = msg.get("content", "") or ""
+
+            name, date_str, time_str, wfh_reason = parse_wfh_card(content)
+
+            # Reviewer
+            member = payload.get("member", {}) or {}
+            user = member.get("user", {}) or payload.get("user", {}) or {}
+            reviewer = (user.get("global_name") or user.get("username") or "Unknown").strip()
+
+            decision = "Rejected"
+            try:
+                append_wfh_decision_row(name, date_str, time_str, wfh_reason, decision, reviewer)
+            except Exception as e:
+                return JSONResponse({"type": 4, "data": {"content": f"❌ Failed to record WFH rejection. {type(e).__name__}: {e}", "flags": 1 << 6}})
+
+            # Edit card & disable buttons
+            new_content = (
+                content
+                + f"\n\n**Status:** {decision} by **{reviewer}** at **{get_ist_timestamp()} IST**"
+                + (f"\n📝 **Rejection Note:** {reject_note}" if reject_note else "")
+            )
+            disabled_components = [{
+                "type": 1,
+                "components": [
+                    {"type": 2, "style": 3, "label": "Approve", "custom_id": "wfh_approve", "disabled": True},
+                    {"type": 2, "style": 4, "label": "Reject",  "custom_id": "wfh_reject",  "disabled": True},
+                ]
+            }]
+            patch_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
+            pr = requests.patch(patch_url, headers=headers,
+                                json={"content": new_content, "components": disabled_components},
+                                timeout=15)
+            if pr.status_code not in (200, 201):
+                print(f"❌ Failed to edit WFH message: {pr.status_code} {pr.text}")
+
+            # Broadcast (append rejection note to reason)
+            combined_reason = wfh_reason + (f" | Rejection Note: {reject_note}" if reject_note else "")
+            post_wfh_status_update(
+                name=name, date_str=date_str, time_str=time_str, reason=combined_reason,
+                decision=decision, reviewer=reviewer, fallback_channel_id=ch_id
+            )
+
+            return JSONResponse({"type": 4, "data": {"content": "✅ WFH rejection recorded.", "flags": 1 << 6}})
 
     # Fallback
     return discord_response_message("Unsupported interaction type.", ephemeral=True)
