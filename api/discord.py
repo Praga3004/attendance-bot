@@ -22,6 +22,7 @@ app = FastAPI(title="Discord Attendance → Google Sheets")
 
 # ========= ENV VARS =========
 DISCORD_PUBLIC_KEY      = os.environ.get("DISCORD_PUBLIC_KEY", "")
+CONTENT_TEAM_CHANNEL_ID = os.environ.get("CONTENT_TEAM_CHANNEL_ID", "")
 SHEET_ID                = os.environ.get("SHEET_ID", "")
 SHEET_RANGE             = os.environ.get("SHEET_RANGE", "Attendance!A:C")
 SERVICE_ACCOUNT_JSON    = os.environ.get("SERVICE_ACCOUNT_JSON", "")
@@ -34,6 +35,48 @@ ATTENDANCE_CHANNEL_ID   = os.environ.get("ATTENDANCE_CHANNEL_ID", "")
 CONTENT_REQUESTS_CHANNEL_ID = os.environ.get("CONTENT_REQUESTS_CHANNEL_ID", "")
 ASSETS_REVIEWS_CHANNEL_ID   = os.environ.get("ASSETS_REVIEWS_CHANNEL_ID", "")
 
+def _post_to_channel(cid: str, content: str):
+    bot_token = BOT_TOKEN.strip()
+    if not (bot_token and cid and content):
+        return False
+    headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+    url = f"https://discord.com/api/v10/channels/{cid}/messages"
+    try:
+        r = requests.post(url, headers=headers, json={
+            "content": content,
+            "allowed_mentions": {"parse": []}
+        }, timeout=15)
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"❌ post_to_channel({cid}) failed: {e}")
+        return False
+def _decision_footer(decision: str, reviewer: str) -> str:
+    return f"\n\n**Status:** {decision} by **{reviewer}** at **{get_ist_timestamp()} IST**"
+
+def content_decision_message_for_team(card_content: str, decision: str, reviewer: str, comments: str) -> str:
+    requester, topic, filename, file_url = parse_content_request_card(card_content)
+    return (
+        f"📣 **Content Request Decision**\n"
+        f"👤 **Requester:** {requester}\n"
+        f"📌 **Topic:** {topic}\n"
+        f"📎 **File:** [{filename}]({file_url})\n"
+        f"🧑‍💼 **Reviewer:** {reviewer}\n"
+        f"✅❌ **Decision:** {decision}"
+        + (f"\n📝 **Comments:** {comments}" if comments else "")
+    )
+
+def asset_decision_message_for_team(card_content: str, decision: str, reviewer: str, comments: str) -> str:
+    requester, asset_name, filename, file_url = parse_asset_review_card(card_content)
+    return (
+        f"📣 **Asset Review Decision**\n"
+        f"👤 **Requester:** {requester}\n"
+        f"🏷️ **Asset:** {asset_name}\n"
+        f"📎 **File:** [{filename}]({file_url})\n"
+        f"🧑‍💼 **Reviewer:** {reviewer}\n"
+        f"✅❌ **Decision:** {decision}"
+        + (f"\n📝 **Comments:** {comments}" if comments else "")
+    )
 
 
 
@@ -1359,6 +1402,9 @@ async def discord_interaction(
             if pr.status_code not in (200, 201):
                 print(f"❌ Failed to edit message: {pr.status_code} {pr.text}")
             append_content_decision_row_from_card(content, decision, reviewer, comment)
+            if CONTENT_TEAM_CHANNEL_ID.strip():
+                team_msg = content_decision_message_for_team(content, decision, reviewer, comment)
+                _post_to_channel(CONTENT_TEAM_CHANNEL_ID.strip(), team_msg)
             return JSONResponse({"type": 4, "data": {"content": "✅ Decision recorded.", "flags": 1 << 6}})
 
         # ---- Asset review modal submit
@@ -1399,6 +1445,13 @@ async def discord_interaction(
             pr = requests.patch(patch_url, headers=headers, json={"content": new_content, "components": disabled_components}, timeout=15)
             if pr.status_code not in (200, 201):
                 print(f"❌ Failed to edit message: {pr.status_code} {pr.text}")
+            append_asset_decision_row_from_card(content, decision, reviewer, comment)
+
+            if CONTENT_TEAM_CHANNEL_ID.strip():
+                team_msg = asset_decision_message_for_team(content, decision, reviewer, comment)
+                _post_to_channel(CONTENT_TEAM_CHANNEL_ID.strip(), team_msg)
+
+
             
             return JSONResponse({"type": 4, "data": {"content": "✅ Decision recorded.", "flags": 1 << 6}})
 
