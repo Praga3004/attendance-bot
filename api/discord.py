@@ -179,27 +179,50 @@ def _sheets_serial_to_dt_ist(value: Any) -> datetime | None:
     return dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
 
 def _ts_cell_to_date_ist(ts_val: Any) -> date | None:
-    """
-    Accepts either a serial (e.g., 45942.58), or text like '2025-10-12 13:57:36' / '2025-10-12'.
-    Returns IST date.
-    """
+    # 1) Try numeric serial first
     dt = _sheets_serial_to_dt_ist(ts_val)
     if dt:
         return dt.date()
+
     s = ("" if ts_val is None else str(ts_val)).strip()
+    if not s:
+        return None
+
+    # 2) Try strict known formats
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
-            naive = datetime.strptime(s[:len(fmt)], fmt)
-            return naive.date()
+            return datetime.strptime(s[:len(fmt)], fmt).date()
         except Exception:
-            continue
+            pass
+
+    # 3) Try ISO 8601
+    try:
+        iso = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(iso)
+        # If it has tz info, convert to IST before taking date
+        if dt.tzinfo:
+            dt = dt.astimezone(ZoneInfo("Asia/Kolkata"))
+        return dt.date()
+    except Exception:
+        pass
+
+    # 4) Try common locale like DD/MM/YYYY
+    for fmt in ("%d/%m/%Y %I:%M:%S %p", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except Exception:
+            pass
+
     return None
+
 
 # ========= ATTENDANCE =========
 def fetch_attendance_rows() -> List[List[str]]:
     service = get_service()
     resp = service.spreadsheets().values().get(
-        spreadsheetId=SHEET_ID, range=ATTENDANCE_READ_RANGE
+        spreadsheetId=SHEET_ID, range=ATTENDANCE_READ_RANGE,
+        valueRenderOption="UNFORMATTED_VALUE",   # << get raw serials/numbers
+        dateTimeRenderOption="SERIAL_NUMBER", 
     ).execute()
     return resp.get("values", []) or []
 
@@ -255,7 +278,7 @@ def append_attendance_row(name: str, action: str, user_id: str, progress: str | 
     Writes: [=NOW(), name, action, user_id, progress]
     """
     service = get_service()
-    values = [["=TODAY()", name, action, user_id or "", (progress or "").strip()]]
+    values = [["=NOW()", name, action, user_id or "", (progress or "").strip()]]
     body = {"values": values}
     
     service.spreadsheets().values().append(
