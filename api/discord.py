@@ -869,6 +869,103 @@ async def discord_interaction(
         cmd_name = data.get("name", "")
         channel_id = payload.get("channel_id", "")
                 # ----- RECORD INVOICE -----
+        
+        # ----- ATTENDANCE -----
+        if cmd_name == "attendance":
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
+
+            member = payload.get("member", {}) or {}
+            user = member.get("user", {}) or payload.get("user", {}) or {}
+            user_id = (user.get("id") or "").strip()
+            name = (user.get("global_name") or user.get("username") or "Unknown").strip()
+
+            try:
+                has_login, has_logout = get_today_status(name, user_id)
+            except Exception as e:
+                return discord_response_message(f"❌ Could not read attendance. {type(e).__name__}: {e}", True)
+
+            # 1) no login yet -> record LOGIN
+            if not has_login:
+                try:
+                    append_attendance_row(name=name, action="Login", user_id=user_id)
+                    broadcast_attendance(name=name, action="Login", user_id=user_id, fallback_channel_id=channel_id)
+                except Exception as e:
+                    return discord_response_message(f"❌ Failed to record login. {type(e).__name__}: {e}", True)
+                return discord_response_message(f"🟢 ✅ Recorded **Login** for **{name}** • 🕒 {get_ist_timestamp()} IST", True)
+
+            # 2) login exists, no logout -> open modal for progress, then record LOGOUT on submit
+            if has_login and not has_logout:
+                modal_id = f"att_logout_progress::{user_id}"
+                return JSONResponse({
+                    "type": 9,  # MODAL
+                    "data": {
+                        "custom_id": modal_id,
+                        "title": "Daily progress (required for logout)",
+                        "components": [{
+                            "type": 1,
+                            "components": [{
+                                "type": 4,  # TEXT_INPUT
+                                "custom_id": "progress_text",
+                                "style": 2,  # PARAGRAPH
+                                "label": "What did you complete today?",
+                                "min_length": 1,
+                                "max_length": 2000,
+                                "required": True,
+                                "placeholder": "Tasks done, blockers, key updates…"
+                            }]
+                        }]
+                    }
+                })
+
+            # 3) already both recorded
+            return discord_response_message("ℹ️ You’ve already recorded **Login** and **Logout** for today.", True)
+
+        # ----- CONTENT REQUEST -----
+        if cmd_name == "contentrequest":
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
+
+            topic = ""
+            data_opts = data.get("options", []) or []
+            for opt in data_opts:
+                if opt.get("name") == "topic":
+                    topic = (opt.get("value") or "").strip()
+            att = _get_attachment_from_options(payload, "files")
+            if not topic or not att:
+                return discord_response_message("❌ Provide a **topic** and attach a **file**.", True)
+
+            filename, file_url, content_type, size = att
+            member = payload.get("member", {}) or {}
+            user = member.get("user", {}) or payload.get("user", {}) or {}
+            requester = (user.get("global_name") or user.get("username") or "Unknown").strip()
+
+            if not (BOT_TOKEN and CONTENT_REQUESTS_CHANNEL_ID):
+                return discord_response_message("❌ Server not configured for content requests.", True)
+
+            content = (
+                f"📝 **Content Request from {requester}**\n"
+                f"📌 **Topic:** {topic}\n"
+                f"📎 **File:** [{filename}]({file_url})\n\n"
+                f"Please review and respond."
+            )
+            components = [{
+                "type": 1,
+                "components": [
+                    {"type": 2, "style": 3, "label": "Approve", "custom_id": "cr_approve"},
+                    {"type": 2, "style": 4, "label": "Reject",  "custom_id": "cr_reject"},
+                ]
+            }]
+
+            headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+            url = f"https://discord.com/api/v10/channels/{CONTENT_REQUESTS_CHANNEL_ID}/messages"
+            try:
+                r = requests.post(url, headers=headers, json={"content": content, "components": components}, timeout=15)
+                r.raise_for_status()
+            except Exception as e:
+                return discord_response_message(f"❌ Could not post to content-requests. {type(e).__name__}: {e}", True)
+
+            return discord_response_message("✅ Sent to **#content-requests** for review.", True)
         if cmd_name == "recordinvoice":
             if not channel_allowed(cmd_name, channel_id):
                 return deny_wrong_channel(cmd_name, channel_id)
@@ -970,103 +1067,6 @@ async def discord_interaction(
             except Exception as e:
                 return discord_response_message(f"❌ Failed to record tax. {type(e).__name__}: {e}", True)
             return discord_response_message(f"✅ Tax recorded for **{inv_no}** — {tax_type} ₹{_to_number(tax_val):,.2f}.", True)
-
-        # ----- ATTENDANCE -----
-        if cmd_name == "attendance":
-            if not channel_allowed(cmd_name, channel_id):
-                return deny_wrong_channel(cmd_name, channel_id)
-
-            member = payload.get("member", {}) or {}
-            user = member.get("user", {}) or payload.get("user", {}) or {}
-            user_id = (user.get("id") or "").strip()
-            name = (user.get("global_name") or user.get("username") or "Unknown").strip()
-
-            try:
-                has_login, has_logout = get_today_status(name, user_id)
-            except Exception as e:
-                return discord_response_message(f"❌ Could not read attendance. {type(e).__name__}: {e}", True)
-
-            # 1) no login yet -> record LOGIN
-            if not has_login:
-                try:
-                    append_attendance_row(name=name, action="Login", user_id=user_id)
-                    broadcast_attendance(name=name, action="Login", user_id=user_id, fallback_channel_id=channel_id)
-                except Exception as e:
-                    return discord_response_message(f"❌ Failed to record login. {type(e).__name__}: {e}", True)
-                return discord_response_message(f"🟢 ✅ Recorded **Login** for **{name}** • 🕒 {get_ist_timestamp()} IST", True)
-
-            # 2) login exists, no logout -> open modal for progress, then record LOGOUT on submit
-            if has_login and not has_logout:
-                modal_id = f"att_logout_progress::{user_id}"
-                return JSONResponse({
-                    "type": 9,  # MODAL
-                    "data": {
-                        "custom_id": modal_id,
-                        "title": "Daily progress (required for logout)",
-                        "components": [{
-                            "type": 1,
-                            "components": [{
-                                "type": 4,  # TEXT_INPUT
-                                "custom_id": "progress_text",
-                                "style": 2,  # PARAGRAPH
-                                "label": "What did you complete today?",
-                                "min_length": 1,
-                                "max_length": 2000,
-                                "required": True,
-                                "placeholder": "Tasks done, blockers, key updates…"
-                            }]
-                        }]
-                    }
-                })
-
-            # 3) already both recorded
-            return discord_response_message("ℹ️ You’ve already recorded **Login** and **Logout** for today.", True)
-
-        # ----- CONTENT REQUEST -----
-        if cmd_name == "contentrequest":
-            if not channel_allowed(cmd_name, channel_id):
-                return deny_wrong_channel(cmd_name, channel_id)
-
-            topic = ""
-            data_opts = data.get("options", []) or []
-            for opt in data_opts:
-                if opt.get("name") == "topic":
-                    topic = (opt.get("value") or "").strip()
-            att = _get_attachment_from_options(payload, "files")
-            if not topic or not att:
-                return discord_response_message("❌ Provide a **topic** and attach a **file**.", True)
-
-            filename, file_url, content_type, size = att
-            member = payload.get("member", {}) or {}
-            user = member.get("user", {}) or payload.get("user", {}) or {}
-            requester = (user.get("global_name") or user.get("username") or "Unknown").strip()
-
-            if not (BOT_TOKEN and CONTENT_REQUESTS_CHANNEL_ID):
-                return discord_response_message("❌ Server not configured for content requests.", True)
-
-            content = (
-                f"📝 **Content Request from {requester}**\n"
-                f"📌 **Topic:** {topic}\n"
-                f"📎 **File:** [{filename}]({file_url})\n\n"
-                f"Please review and respond."
-            )
-            components = [{
-                "type": 1,
-                "components": [
-                    {"type": 2, "style": 3, "label": "Approve", "custom_id": "cr_approve"},
-                    {"type": 2, "style": 4, "label": "Reject",  "custom_id": "cr_reject"},
-                ]
-            }]
-
-            headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
-            url = f"https://discord.com/api/v10/channels/{CONTENT_REQUESTS_CHANNEL_ID}/messages"
-            try:
-                r = requests.post(url, headers=headers, json={"content": content, "components": components}, timeout=15)
-                r.raise_for_status()
-            except Exception as e:
-                return discord_response_message(f"❌ Could not post to content-requests. {type(e).__name__}: {e}", True)
-
-            return discord_response_message("✅ Sent to **#content-requests** for review.", True)
 
         # ----- ASSET REVIEW -----
         if cmd_name == "assetreview":
