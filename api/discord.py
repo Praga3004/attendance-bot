@@ -31,6 +31,38 @@ APPROVER_USER_ID        = os.environ.get("APPROVER_USER_ID", "")
 LEAVE_STATUS_CHANNEL_ID = os.environ.get("LEAVE_STATUS_CHANNEL_ID", "")
 HR_ROLE_ID              = os.environ.get("HR_ROLE_ID", "")
 ATTENDANCE_CHANNEL_ID   = os.environ.get("ATTENDANCE_CHANNEL_ID", "")
+CONTENT_REQUESTS_CHANNEL_ID = os.environ.get("CONTENT_REQUESTS_CHANNEL_ID", "")
+ASSETS_REVIEWS_CHANNEL_ID   = os.environ.get("ASSETS_REVIEWS_CHANNEL_ID", "")
+
+
+
+
+def _get_attachment_from_options(interaction_payload: dict, option_name: str):
+    """
+    Returns (filename, url, content_type, size) for the attachment option.
+    Discord sends attachment IDs in `data.options` values and full objects in `data.resolved.attachments`.
+    """
+    data = interaction_payload.get("data", {}) or {}
+    options = data.get("options", []) or []
+    resolved = data.get("resolved", {}) or {}
+    atts = resolved.get("attachments", {}) or {}
+
+    att_id = None
+    for opt in options:
+        if opt.get("name") == option_name:
+            att_id = opt.get("value")
+            break
+    if not att_id:
+        return None
+
+    a = atts.get(str(att_id)) or {}
+    return (
+        a.get("filename"),
+        a.get("url"),
+        a.get("content_type"),
+        a.get("size"),
+    )
+
 def _date_opts(start: date, days: int) -> list[dict]:
     days = max(0, min(days, 25))  # Discord limit
     return [{
@@ -557,6 +589,98 @@ async def discord_interaction(
             except Exception as e:
                 return discord_response_message(f"❌ Failed to record attendance. {type(e).__name__}: {e}", True)
             return discord_response_message(f"{info}\n👤 **{name}** • 🕒 **{get_ist_timestamp()} IST**", True)
+                # ----- CONTENT REQUEST -----
+        if cmd_name == "contentrequest":
+            # options: topic (string), files (attachment)
+            topic = ""
+            data_opts = data.get("options", []) or []
+            for opt in data_opts:
+                if opt.get("name") == "topic":
+                    topic = (opt.get("value") or "").strip()
+            att = _get_attachment_from_options(payload, "files")
+            if not topic or not att:
+                return discord_response_message("❌ Provide a **topic** and attach a **file**.", True)
+
+            filename, file_url, content_type, size = att
+            member = payload.get("member", {}) or {}
+            user = member.get("user", {}) or payload.get("user", {}) or {}
+            requester = (user.get("global_name") or user.get("username") or "Unknown").strip()
+
+            bot_token = BOT_TOKEN.strip()
+            target_ch = CONTENT_REQUESTS_CHANNEL_ID.strip()
+            if not (bot_token and target_ch):
+                return discord_response_message("❌ Server not configured for content requests.", True)
+
+            content = (
+                f"📝 **Content Request from {requester}**\n"
+                f"📌 **Topic:** {topic}\n"
+                f"📎 **File:** [{filename}]({file_url})\n\n"
+                f"Please review and respond."
+            )
+            components = [{
+                "type": 1,
+                "components": [
+                    {"type": 2, "style": 3, "label": "Approve", "custom_id": "cr_approve"},
+                    {"type": 2, "style": 4, "label": "Reject",  "custom_id": "cr_reject"},
+                ]
+            }]
+
+            headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+            url = f"https://discord.com/api/v10/channels/{target_ch}/messages"
+            try:
+                r = requests.post(url, headers=headers, json={"content": content, "components": components}, timeout=15)
+                r.raise_for_status()
+            except Exception as e:
+                return discord_response_message(f"❌ Could not post to content-requests. {type(e).__name__}: {e}", True)
+
+            return discord_response_message("✅ Sent to **#content-requests** for review.", True)
+                # ----- ASSET REVIEW -----
+        if cmd_name == "assetreview":
+            # options: name (string), file (attachment)
+            asset_name = ""
+            data_opts = data.get("options", []) or []
+            for opt in data_opts:
+                if opt.get("name") == "name":
+                    asset_name = (opt.get("value") or "").strip()
+            att = _get_attachment_from_options(payload, "file")
+            if not asset_name or not att:
+                return discord_response_message("❌ Provide **name** and attach a **file**.", True)
+
+            filename, file_url, content_type, size = att
+            member = payload.get("member", {}) or {}
+            user = member.get("user", {}) or payload.get("user", {}) or {}
+            requester = (user.get("global_name") or user.get("username") or "Unknown").strip()
+
+            bot_token = BOT_TOKEN.strip()
+            target_ch = ASSETS_REVIEWS_CHANNEL_ID.strip()
+            if not (bot_token and target_ch):
+                return discord_response_message("❌ Server not configured for asset reviews.", True)
+
+            content = (
+                f"🧪 **Asset Review Request from {requester}**\n"
+                f"🏷️ **Name:** {asset_name}\n"
+                f"📎 **File:** [{filename}]({file_url})\n\n"
+                f"Please review and respond."
+            )
+            components = [{
+                "type": 1,
+                "components": [
+                    {"type": 2, "style": 3, "label": "Approve", "custom_id": "ar_approve"},
+                    {"type": 2, "style": 4, "label": "Reject",  "custom_id": "ar_reject"},
+                ]
+            }]
+
+            headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+            url = f"https://discord.com/api/v10/channels/{target_ch}/messages"
+            try:
+                r = requests.post(url, headers=headers, json={"content": content, "components": components}, timeout=15)
+                r.raise_for_status()
+            except Exception as e:
+                return discord_response_message(f"❌ Could not post to assets-reviews. {type(e).__name__}: {e}", True)
+
+            return discord_response_message("✅ Sent to **#assets-reviews** for verification.", True)
+
+
 
         # ----- LEAVE COUNT -----
         if cmd_name == "leavecount":
@@ -957,6 +1081,58 @@ async def discord_interaction(
                         }]
                     }
                 })
+                # ---- Content request approve/reject
+        if custom_id in ("cr_approve", "cr_reject"):
+            ch_id  = payload.get("channel_id", "")
+            msg_id = message.get("id", "")
+            modal_id = ("cr_approve_reason" if custom_id == "cr_approve" else "cr_reject_reason") + f"::{ch_id}::{msg_id}"
+            title = "Approve Content (add improvement notes)" if custom_id == "cr_approve" else "Reject Content (add reason)"
+            label = "Improvement comments" if custom_id == "cr_approve" else "Rejection comments"
+            return JSONResponse({
+                "type": 9,  # MODAL
+                "data": {
+                    "custom_id": modal_id,
+                    "title": title,
+                    "components": [{
+                        "type": 1,
+                        "components": [{
+                            "type": 4,  # TEXT_INPUT
+                            "custom_id": "comments",
+                            "style": 2,  # PARAGRAPH
+                            "label": label,
+                            "min_length": 1, "max_length": 1000, "required": True,
+                            "placeholder": "Write your feedback here"
+                        }]
+                    }]
+                }
+            })
+
+        # ---- Asset review approve/reject
+        if custom_id in ("ar_approve", "ar_reject"):
+            ch_id  = payload.get("channel_id", "")
+            msg_id = message.get("id", "")
+            modal_id = ("ar_approve_reason" if custom_id == "ar_approve" else "ar_reject_reason") + f"::{ch_id}::{msg_id}"
+            title = "Approve Asset (add improvement notes)" if custom_id == "ar_approve" else "Reject Asset (add reason)"
+            label = "Improvement comments" if custom_id == "ar_approve" else "Rejection comments"
+            return JSONResponse({
+                "type": 9,  # MODAL
+                "data": {
+                    "custom_id": modal_id,
+                    "title": title,
+                    "components": [{
+                        "type": 1,
+                        "components": [{
+                            "type": 4,
+                            "custom_id": "comments",
+                            "style": 2,
+                            "label": label,
+                            "min_length": 1, "max_length": 1000, "required": True,
+                            "placeholder": "Write your feedback here"
+                        }]
+                    }]
+                }
+            })
+
 
         # Fallback for unknown buttons/selects
         return JSONResponse({
@@ -1048,6 +1224,88 @@ async def discord_interaction(
                 fallback_channel_id=ch_id
             )
             return JSONResponse({"type": 4, "data": {"content": "✅ Rejection recorded.", "flags": 1 << 6}})
+                # ---- Content request modal submit
+        if modal_custom_id.startswith(("cr_approve_reason::", "cr_reject_reason::")):
+            _, ch_id, msg_id = (modal_custom_id.split("::") + ["", "", ""])[:3]
+            comment = reject_note  # already parsed above as `reject_note` (we reuse it here as generic comment)
+            bot_token = BOT_TOKEN.strip()
+            if not (bot_token and ch_id and msg_id):
+                return JSONResponse({"type": 4, "data": {"content": "❌ Missing context.", "flags": 1 << 6}})
+            headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+
+            # Load the original message to keep content & disable buttons
+            get_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
+            r = requests.get(get_url, headers=headers, timeout=15)
+            if r.status_code != 200:
+                return JSONResponse({"type": 4, "data": {"content": f"❌ Could not load message ({r.status_code}).", "flags": 1 << 6}})
+            msg = r.json()
+            content = msg.get("content", "") or ""
+
+            decision = "Approved" if modal_custom_id.startswith("cr_approve_reason::") else "Rejected"
+            # reviewer name
+            member = payload.get("member", {}) or {}
+            user = member.get("user", {}) or payload.get("user", {}) or {}
+            reviewer = (user.get("global_name") or user.get("username") or "Unknown").strip()
+
+            new_content = (
+                content
+                + f"\n\n**Status:** {decision} by **{reviewer}** at **{get_ist_timestamp()} IST**"
+                + (f"\n📝 **Comments:** {comment}" if comment else "")
+            )
+            disabled_components = [{
+                "type": 1,
+                "components": [
+                    {"type": 2, "style": 3, "label": "Approve", "custom_id": "cr_approve", "disabled": True},
+                    {"type": 2, "style": 4, "label": "Reject",  "custom_id": "cr_reject",  "disabled": True},
+                ]
+            }]
+
+            patch_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
+            pr = requests.patch(patch_url, headers=headers, json={"content": new_content, "components": disabled_components}, timeout=15)
+            if pr.status_code not in (200, 201):
+                print(f"❌ Failed to edit message: {pr.status_code} {pr.text}")
+            return JSONResponse({"type": 4, "data": {"content": "✅ Decision recorded.", "flags": 1 << 6}})
+
+        # ---- Asset review modal submit
+        if modal_custom_id.startswith(("ar_approve_reason::", "ar_reject_reason::")):
+            _, ch_id, msg_id = (modal_custom_id.split("::") + ["", "", ""])[:3]
+            comment = reject_note
+            bot_token = BOT_TOKEN.strip()
+            if not (bot_token and ch_id and msg_id):
+                return JSONResponse({"type": 4, "data": {"content": "❌ Missing context.", "flags": 1 << 6}})
+            headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+
+            get_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
+            r = requests.get(get_url, headers=headers, timeout=15)
+            if r.status_code != 200:
+                return JSONResponse({"type": 4, "data": {"content": f"❌ Could not load message ({r.status_code}).", "flags": 1 << 6}})
+            msg = r.json()
+            content = msg.get("content", "") or ""
+
+            decision = "Approved" if modal_custom_id.startswith("ar_approve_reason::") else "Rejected"
+            member = payload.get("member", {}) or {}
+            user = member.get("user", {}) or payload.get("user", {}) or {}
+            reviewer = (user.get("global_name") or user.get("username") or "Unknown").strip()
+
+            new_content = (
+                content
+                + f"\n\n**Status:** {decision} by **{reviewer}** at **{get_ist_timestamp()} IST**"
+                + (f"\n📝 **Comments:** {comment}" if comment else "")
+            )
+            disabled_components = [{
+                "type": 1,
+                "components": [
+                    {"type": 2, "style": 3, "label": "Approve", "custom_id": "ar_approve", "disabled": True},
+                    {"type": 2, "style": 4, "label": "Reject",  "custom_id": "ar_reject",  "disabled": True},
+                ]
+            }]
+
+            patch_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
+            pr = requests.patch(patch_url, headers=headers, json={"content": new_content, "components": disabled_components}, timeout=15)
+            if pr.status_code not in (200, 201):
+                print(f"❌ Failed to edit message: {pr.status_code} {pr.text}")
+            return JSONResponse({"type": 4, "data": {"content": "✅ Decision recorded.", "flags": 1 << 6}})
+
 
         # WFH rejection modal
         if modal_custom_id.startswith("wfh_reject_reason::"):
