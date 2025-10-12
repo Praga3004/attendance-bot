@@ -30,7 +30,7 @@ SERVICE_ACCOUNT_JSON         = (os.environ.get("SERVICE_ACCOUNT_JSON", "") or ""
 BOT_TOKEN                    = (os.environ.get("BOT_TOKEN", "") or "").strip()
 
 # Channels / roles
-# Channels / roles
+
 FINANCE_CHANNEL_ID           = (os.environ.get("FINANCE_CHANNEL_ID", "") or "").strip()
 APPROVER_CHANNEL_ID          = (os.environ.get("APPROVER_CHANNEL_ID", "") or "").strip()
 APPROVER_USER_ID             = (os.environ.get("APPROVER_USER_ID", "") or "").strip()
@@ -676,7 +676,7 @@ def _overlap_days(d1s: date, d1e: date, d2s: date, d2e: date) -> int:
 def fetch_leave_decisions_rows() -> List[List[str]]:
     service = get_service()
     resp = service.spreadsheets().values().get(
-        spreadsheetId=SHEET_ID, range="'Leave Decisions'!A:G"
+        spreadsheetId=SHEET_ID, range="'Leave Decisions'!A:H"
     ).execute()
     return resp.get("values", []) or []
 
@@ -872,10 +872,21 @@ async def discord_interaction(
         data = payload.get("data", {}) or {}
         cmd_name = data.get("name", "")
         focused = None
+
         for opt in data.get("options", []) or []:
             if opt.get("focused"):
                 focused = opt
                 break
+        if cmd_name in ("clearinvoice", "recordtax") and focused and focused.get("name") == "invoicenumber":
+            q = (focused.get("value") or "").strip()
+            rows = list_invoices_for_autocomplete(q)
+            # label must be <= 100 chars; value should be the inv_no
+            choices = []
+            for inv_no, company, total, cleared, out in rows:
+                label = f"{inv_no} — {company} (Out: ₹{out:,.0f}, Clr: ₹{cleared:,.0f})"
+                # Truncate label if needed
+                choices.append({"name": label[:100], "value": inv_no})
+            return JSONResponse({"type": 8, "data": {"choices": choices}})
 
         # --- /wfh date autocomplete ---
         if cmd_name == "wfh" and focused and focused.get("name") == "date":
@@ -886,7 +897,7 @@ async def discord_interaction(
                 label = f"{d.isoformat()} ({d.strftime('%a')})"
                 choices.append({"name": label, "value": d.isoformat()})
             return JSONResponse({"type": 8, "data": {"choices": choices}})
-        
+
         # --- /leaverequest from/to autocomplete ---
         if cmd_name == "leaverequest" and focused:
             channel_id = payload.get("channel_id", "")
@@ -1266,6 +1277,7 @@ async def discord_interaction(
                 return deny_wrong_channel(cmd_name, channel_id)
             options = data.get("options", []) or []
             from_opt = to_opt = reason_opt = None
+            days_opt = None
             for opt in options:
                 n = opt.get("name")
                 if n == "from": from_opt = (opt.get("value") or "").strip()
@@ -1558,24 +1570,25 @@ async def discord_interaction(
                 return JSONResponse({"type": 4, "data": {"content": "❌ No end date selected.", "flags": 1 << 6}})
             modal_custom_id = f"leave_reason::{from_date}::{to_date}"
             return JSONResponse({
-                "type": 9,  # MODAL
+                "type": 9,
                 "data": {
                     "custom_id": modal_custom_id,
-                    "title": "Leave Reason",
-                    "components": [{
-                        "type": 1,
-                        "components": [{
-                            "type": 4,  # TEXT_INPUT
-                            "custom_id": "leave_reason_text",
-                            "style": 2,  # PARAGRAPH
-                            "label": "Reason (optional)",
-                            "required": False,
-                            "max_length": 1000,
-                            "placeholder": "Why are you requesting this leave?"
-                        }]
-                    }]
+                    "title": "Leave Details",
+                    "components": [
+                        { "type": 1, "components": [{
+                            "type": 4, "custom_id": "leave_reason_text",
+                            "style": 2, "label": "Reason (optional)",
+                            "required": False, "max_length": 1000
+                        }]},
+                        { "type": 1, "components": [{
+                            "type": 4, "custom_id": "leave_days_text",
+                            "style": 1, "label": "Total days (number)",  # style:1 = short
+                            "required": True, "min_length": 1, "max_length": 5, "placeholder": "e.g., 2"
+                        }]}
+                    ]
                 }
             })
+
 
         # ---- WFH approve/reject buttons
         if custom_id in ("wfh_approve", "wfh_reject"):
@@ -1961,26 +1974,38 @@ async def discord_interaction(
         if modal_custom_id.startswith("leave_reason::"):
             _, from_date, to_date = (modal_custom_id.split("::") + ["", "", ""])[:3]
             comps2 = data.get("components", []) or []
+
             reason_text = ""
+            days_str = ""
             try:
                 reason_text = comps2[0]["components"][0]["value"].strip()
             except Exception:
                 pass
+            try:
+                days_str = comps2[1]["components"][0]["value"].strip()
+            except Exception:
+                pass
+
+            days = _to_int(days_str, 0)
+            if days <= 0:
+                return discord_response_message("❌ Please provide a valid **days** (integer ≥ 1).", True)
 
             member2 = payload.get("member", {}) or {}
             user2 = member2.get("user", {}) or payload.get("user", {}) or {}
             name2 = (user2.get("global_name") or user2.get("username") or "Unknown").strip()
 
             try:
-                append_leave_row(name=name2, from_date=from_date, to_date=to_date, reason=reason_text or "")
+                append_leave_row(name=name2, from_date=from_date, days=days, to_date=to_date, reason=reason_text or "")
                 if BOT_TOKEN:
                     content2 = (
                         f"📩 **Leave Request from {name2}**\n"
                         f"🗓️ **From:** {from_date}\n"
                         f"🗓️ **To:** {to_date}\n"
+                        f"🗓️ **Days:** {days}\n"
                         f"💬 **Reason:** {reason_text or '(not provided)'}\n\n"
                         f"Please review and respond accordingly."
                     )
+
                     components2 = [{
                         "type": 1,
                         "components": [
