@@ -53,8 +53,8 @@ CMD_ALLOWED_CHANNELS = {
     "wfh":           {LEAVE_REQUESTS_CHANNEL_ID},
     "leavecount":    {LEAVE_REQUESTS_CHANNEL_ID},
     "attendance":    {ATTENDANCE_CHANNEL_ID},
-    "contentrequest": {CONTENT_REQUESTS_CHANNEL_ID},
-    "assetreview":    {ASSETS_REVIEWS_CHANNEL_ID},
+    "contentrequest": {CONTENT_TEAM_CHANNEL_ID},
+    "assetreview":    {CONTENT_TEAM_CHANNEL_ID},
 }
 CHANNEL_LABELS = {
     LEAVE_REQUESTS_CHANNEL_ID: "#leave-requests",
