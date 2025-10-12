@@ -30,6 +30,8 @@ SERVICE_ACCOUNT_JSON         = (os.environ.get("SERVICE_ACCOUNT_JSON", "") or ""
 BOT_TOKEN                    = (os.environ.get("BOT_TOKEN", "") or "").strip()
 
 # Channels / roles
+# Channels / roles
+FINANCE_CHANNEL_ID           = (os.environ.get("FINANCE_CHANNEL_ID", "") or "").strip()
 APPROVER_CHANNEL_ID          = (os.environ.get("APPROVER_CHANNEL_ID", "") or "").strip()
 APPROVER_USER_ID             = (os.environ.get("APPROVER_USER_ID", "") or "").strip()
 LEAVE_STATUS_CHANNEL_ID      = (os.environ.get("LEAVE_STATUS_CHANNEL_ID", "") or "").strip()
@@ -61,6 +63,145 @@ CHANNEL_LABELS = {
     ASSETS_REVIEWS_CHANNEL_ID: "#assets-reviews",
     CONTENT_TEAM_CHANNEL_ID: "#content-team",
 }
+CHANNEL_LABELS.update({
+    FINANCE_CHANNEL_ID: "#finance",
+})
+CMD_ALLOWED_CHANNELS.update({
+    "recordinvoice": {FINANCE_CHANNEL_ID},
+    "clearinvoice":  {FINANCE_CHANNEL_ID},
+    "viewinvoice":   {FINANCE_CHANNEL_ID},
+    "viewfinstatus": {FINANCE_CHANNEL_ID},
+    "recordtax":     {FINANCE_CHANNEL_ID},
+})
+INVOICES_RANGE        = "'Invoices'!A:E"        
+INVOICE_CLEARS_RANGE  = "'Invoice Clears'!A:D"  
+TAXES_RANGE           = "'Taxes'!A:E"           
+
+def _get_opt(opts_list, name: str, default: str = "") -> str:
+    """Case-insensitive option getter for slash command options."""
+    for o in (opts_list or []):
+        if (o.get("name") or "").lower() == name.lower():
+            return (o.get("value") or "").strip()
+    return default
+
+def _to_number(x) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return 0.0
+
+def append_invoice_row(company: str, invoice_no: str, value: str, comments: str) -> None:
+    service = get_service()
+    values = [[get_ist_timestamp(), company, invoice_no, _to_number(value), comments or ""]]
+    body = {"values": values}
+    service.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID,
+        range=INVOICES_RANGE,
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body=body,
+    ).execute()
+
+def append_invoice_clear_row(invoice_no: str, cleared_value: str, comments: str) -> None:
+    service = get_service()
+    values = [[get_ist_timestamp(), invoice_no, _to_number(cleared_value), comments or ""]]
+    body = {"values": values}
+    service.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID,
+        range=INVOICE_CLEARS_RANGE,
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body=body,
+    ).execute()
+
+def append_tax_row(invoice_no: str, tax_type: str, tax_value: str, comments: str) -> None:
+    service = get_service()
+    values = [[get_ist_timestamp(), invoice_no, tax_type, _to_number(tax_value), comments or ""]]
+    body = {"values": values}
+    service.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID,
+        range=TAXES_RANGE,
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body=body,
+    ).execute()
+
+def fetch_invoices():
+    service = get_service()
+    resp = service.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID,
+        range=INVOICES_RANGE,
+        valueRenderOption="UNFORMATTED_VALUE",
+        dateTimeRenderOption="SERIAL_NUMBER",
+    ).execute()
+    return resp.get("values", []) or []
+
+def fetch_invoice_clears():
+    service = get_service()
+    resp = service.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID,
+        range=INVOICE_CLEARS_RANGE,
+        valueRenderOption="UNFORMATTED_VALUE",
+        dateTimeRenderOption="SERIAL_NUMBER",
+    ).execute()
+    return resp.get("values", []) or []
+
+def fetch_taxes():
+    service = get_service()
+    resp = service.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID,
+        range=TAXES_RANGE,
+        valueRenderOption="UNFORMATTED_VALUE",
+        dateTimeRenderOption="SERIAL_NUMBER",
+    ).execute()
+    return resp.get("values", []) or []
+
+def compute_fin_status():
+    """Returns (total_invoiced, total_cleared, outstanding_total, taxes_by_type dict, outstanding_by_invoice dict)."""
+    inv = fetch_invoices()
+    cl  = fetch_invoice_clears()
+    tx  = fetch_taxes()
+
+    # Skip header if present (detect by string in value col)
+    inv_start = 1 if inv and (len(inv[0])>=4 and isinstance(inv[0][3], str)) else 0
+    cl_start  = 1 if cl  and (len(cl[0]) >=3 and isinstance(cl[0][2], str)) else 0
+    tx_start  = 1 if tx  and (len(tx[0]) >=4 and isinstance(tx[0][3], str)) else 0
+
+    totals_by_invoice = {}
+    for r in inv[inv_start:]:
+        if len(r) < 4: 
+            continue
+        inv_no = str(r[2]).strip()
+        val = _to_number(r[3])
+        totals_by_invoice[inv_no] = totals_by_invoice.get(inv_no, 0.0) + val
+
+    cleared_by_invoice = {}
+    for r in cl[cl_start:]:
+        if len(r) < 3: 
+            continue
+        inv_no = str(r[1]).strip()
+        val = _to_number(r[2])
+        cleared_by_invoice[inv_no] = cleared_by_invoice.get(inv_no, 0.0) + val
+
+    taxes_by_type = {}
+    for r in tx[tx_start:]:
+        if len(r) < 4: 
+            continue
+        tax_type = str(r[2]).strip() or "Unspecified"
+        val = _to_number(r[3])
+        taxes_by_type[tax_type] = taxes_by_type.get(tax_type, 0.0) + val
+
+    outstanding_by_invoice = {}
+    for inv_no, total in totals_by_invoice.items():
+        cleared = cleared_by_invoice.get(inv_no, 0.0)
+        outstanding_by_invoice[inv_no] = max(total - cleared, 0.0)
+
+    total_invoiced = sum(totals_by_invoice.values())
+    total_cleared  = sum(cleared_by_invoice.values())
+    outstanding_total = max(total_invoiced - total_cleared, 0.0)
+
+    return total_invoiced, total_cleared, outstanding_total, taxes_by_type, outstanding_by_invoice
+
 def _get_attachment_from_options(interaction_payload: dict, option_name: str):
     """
     Returns (filename, url, content_type, size) for the attachment option.
@@ -727,6 +868,108 @@ async def discord_interaction(
         data = payload.get("data", {}) or {}
         cmd_name = data.get("name", "")
         channel_id = payload.get("channel_id", "")
+                # ----- RECORD INVOICE -----
+        if cmd_name == "recordinvoice":
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
+            opts = data.get("options", []) or []
+            company  = _get_opt(opts, "companyname")
+            inv_no   = _get_opt(opts, "invoicenumber")
+            inv_val  = _get_opt(opts, "invoicevalue")
+            comments = _get_opt(opts, "comments")
+            if not (company and inv_no and inv_val):
+                return discord_response_message("❌ Missing fields. Required: CompanyName, InvoiceNumber, InvoiceValue.", True)
+            try:
+                append_invoice_row(company, inv_no, inv_val, comments)
+            except Exception as e:
+                return discord_response_message(f"❌ Failed to record invoice. {type(e).__name__}: {e}", True)
+            return discord_response_message(f"✅ Invoice **{inv_no}** recorded for **{company}** (₹{_to_number(inv_val):,.2f}).", True)
+
+        # ----- CLEAR INVOICE (RECEIPT) -----
+        if cmd_name == "clearinvoice":
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
+            opts = data.get("options", []) or []
+            inv_no   = _get_opt(opts, "invoicenumber")
+            cleared  = _get_opt(opts, "valuecleared")
+            comments = _get_opt(opts, "comments")
+            if not (inv_no and cleared):
+                return discord_response_message("❌ Missing fields. Required: InvoiceNumber, ValueCleared.", True)
+            try:
+                append_invoice_clear_row(inv_no, cleared, comments)
+            except Exception as e:
+                return discord_response_message(f"❌ Failed to record clearance. {type(e).__name__}: {e}", True)
+            return discord_response_message(f"✅ Recorded ₹{_to_number(cleared):,.2f} cleared for **{inv_no}**.", True)
+
+        # ----- VIEW INVOICE (list) -----
+        if cmd_name == "viewinvoice":
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
+            try:
+                inv = fetch_invoices()
+                cl  = fetch_invoice_clears()
+            except Exception as e:
+                return discord_response_message(f"❌ Could not load invoices. {type(e).__name__}: {e}", True)
+
+            # Build maps
+            inv_start = 1 if inv and (len(inv[0])>=4 and isinstance(inv[0][3], str)) else 0
+            cl_start  = 1 if cl  and (len(cl[0]) >=3 and isinstance(cl[0][2], str)) else 0
+            totals, cleared = {}, {}
+            rows = []
+            for r in inv[inv_start:]:
+                if len(r) < 4: continue
+                ts = str(r[0]); company = str(r[1]); inv_no = str(r[2]); val = _to_number(r[3])
+                totals[inv_no] = totals.get(inv_no, 0.0) + val
+                rows.append((ts, company, inv_no, val))
+            for r in cl[cl_start:]:
+                if len(r) < 3: continue
+                inv_no = str(r[1]); val = _to_number(r[2])
+                cleared[inv_no] = cleared.get(inv_no, 0.0) + val
+
+            # Compose a compact list (max 10)
+            lines = []
+            for i, (ts, company, inv_no, val) in enumerate(rows[:10], 1):
+                out = max(totals.get(inv_no,0.0) - cleared.get(inv_no,0.0), 0.0)
+                lines.append(f"{i}. **{inv_no}** — {company} • ₹{val:,.2f} • Outst.: ₹{out:,.2f}")
+            extra = f"\n…plus {max(len(rows)-10,0)} more." if len(rows) > 10 else ""
+            msg = "🧾 **Invoices**\n" + ("\n".join(lines) if lines else "No invoices found.") + extra
+            return discord_response_message(msg, True)
+
+        # ----- VIEW FIN STATUS (totals & taxes) -----
+        if cmd_name == "viewfinstatus":
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
+            try:
+                total_inv, total_cl, outstanding, taxes_by_type, _ = compute_fin_status()
+            except Exception as e:
+                return discord_response_message(f"❌ Could not compute status. {type(e).__name__}: {e}", True)
+
+            tax_lines = [f"• {k}: ₹{v:,.2f}" for k, v in sorted(taxes_by_type.items())] or ["• (none)"]
+            msg = (
+                "💼 **Finance Status**\n"
+                f"• Total Invoiced: **₹{total_inv:,.2f}**\n"
+                f"• Total Cleared: **₹{total_cl:,.2f}**\n"
+                f"• Outstanding: **₹{outstanding:,.2f}**\n\n"
+                "🧾 **Taxes recorded (by type)**\n" + "\n".join(tax_lines)
+            )
+            return discord_response_message(msg, True)
+
+        # ----- RECORD TAX -----
+        if cmd_name == "recordtax":
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
+            opts = data.get("options", []) or []
+            inv_no   = _get_opt(opts, "invoicenumber")
+            tax_type = _get_opt(opts, "taxtype")
+            tax_val  = _get_opt(opts, "taxvalue")
+            comments = _get_opt(opts, "comments")
+            if not (inv_no and tax_type and tax_val):
+                return discord_response_message("❌ Missing fields. Required: InvoiceNumber, TaxType, TaxValue.", True)
+            try:
+                append_tax_row(inv_no, tax_type, tax_val, comments)
+            except Exception as e:
+                return discord_response_message(f"❌ Failed to record tax. {type(e).__name__}: {e}", True)
+            return discord_response_message(f"✅ Tax recorded for **{inv_no}** — {tax_type} ₹{_to_number(tax_val):,.2f}.", True)
 
         # ----- ATTENDANCE -----
         if cmd_name == "attendance":
