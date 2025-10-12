@@ -38,7 +38,7 @@ LEAVE_REQUESTS_CHANNEL_ID = os.environ.get("LEAVE_REQUESTS_CHANNEL_ID","").strip
 CONTENT_TEAM_CHANNEL_ID   = os.environ.get("CONTENT_TEAM_CHANNEL_ID","").strip()
 
 CMD_ALLOWED_CHANNELS = {
-    "leaverequests": {LEAVE_REQUESTS_CHANNEL_ID},
+    "leaverequest": {LEAVE_REQUESTS_CHANNEL_ID},
     "wfh":           {LEAVE_REQUESTS_CHANNEL_ID},
     "leavecount":    {LEAVE_REQUESTS_CHANNEL_ID},
     "attendance":    {ATTENDANCE_CHANNEL_ID},
