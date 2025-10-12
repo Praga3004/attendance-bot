@@ -77,6 +77,12 @@ INVOICES_RANGE        = "'Invoices'!A:E"
 INVOICE_CLEARS_RANGE  = "'Invoice Clears'!A:D"  
 TAXES_RANGE           = "'Taxes'!A:E"           
 
+def _to_int(x, default: int = 0) -> int:
+    try:
+        return int(float(str(x)))
+    except Exception:
+        return default
+
 def _get_opt(opts_list, name: str, default: str = "") -> str:
     """Case-insensitive option getter for slash command options.
        Coerces values to str to avoid .strip() on numbers."""
@@ -407,9 +413,9 @@ def get_today_status(name: str, user_id: str) -> Tuple[bool, bool]:
             print("Both")
             break
     return has_login, has_logout
-def append_leave_row(name: str, from_date: str, to_date: str, reason: str) -> None:
+def append_leave_row(name: str, from_date: str, days: int, to_date: str, reason: str) -> None:
     service = get_service()
-    values = [[get_ist_timestamp(), name, from_date, to_date, reason]]
+    values = [[get_ist_timestamp(), name, from_date, days, to_date, reason]]
     body = {"values": values}
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
@@ -1160,6 +1166,7 @@ async def discord_interaction(
             for opt in options:
                 n = opt.get("name")
                 if n == "from": from_opt = (opt.get("value") or "").strip()
+                elif n == "days": days_opt = _get_opt(options, "days") 
                 elif n == "to": to_opt = (opt.get("value") or "").strip()
                 elif n == "reason": reason_opt = (opt.get("value") or "").strip()
 
@@ -1176,14 +1183,19 @@ async def discord_interaction(
                     "🗓️ I posted a **From date** picker. Choose From first; I’ll then show valid **To** dates.",
                     True
                 )
+            days = _to_int(days_opt, 0)
+            if days <= 0:
+                return discord_response_message("❌ Please provide a valid **days** (integer ≥ 1).", True)
+        
             try:
-                append_leave_row(name=name, from_date=from_opt, to_date=to_opt, reason=reason_opt or "")
+                append_leave_row(name=name, from_date=from_opt, days=days,to_date=to_opt, reason=reason_opt or "")
                 # Notify approver with buttons
                 if BOT_TOKEN:
                     content = (
                         f"📩 **Leave Request from {name}**\n"
                         f"🗓️ **From:** {from_opt}\n"
                         f"🗓️ **To:** {to_opt}\n"
+                        f"🗓️ **Days:** {days}\n"
                         f"💬 **Reason:** {reason_opt or '(not provided)'}\n\n"
                         f"Please review and respond accordingly."
                     )
