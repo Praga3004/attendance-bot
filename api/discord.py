@@ -248,8 +248,9 @@ def append_attendance_row(name: str, action: str, user_id: str, progress: str | 
     Writes: [=NOW(), name, action, user_id, progress]
     """
     service = get_service()
-    values = [["=NOW()", name, action, user_id or "", (progress or "").strip()]]
+    values = [["=TODAY()", name, action, user_id or "", (progress or "").strip()]]
     body = {"values": values}
+    
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
         range=ATTENDANCE_WRITE_RANGE,
