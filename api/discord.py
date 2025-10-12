@@ -78,10 +78,14 @@ INVOICE_CLEARS_RANGE  = "'Invoice Clears'!A:D"
 TAXES_RANGE           = "'Taxes'!A:E"           
 
 def _get_opt(opts_list, name: str, default: str = "") -> str:
-    """Case-insensitive option getter for slash command options."""
+    """Case-insensitive option getter for slash command options.
+       Coerces values to str to avoid .strip() on numbers."""
     for o in (opts_list or []):
         if (o.get("name") or "").lower() == name.lower():
-            return (o.get("value") or "").strip()
+            v = o.get("value", "")
+            if v is None:
+                return default
+            return str(v).strip()
     return default
 
 def _to_number(x) -> float:
