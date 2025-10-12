@@ -261,6 +261,100 @@ def append_leave_decision_row(name: str, from_date: str, to_date: str, reason: s
         body=body,
     ).execute()
 
+import re
+
+# ---------- Parsers (from the card text you post) ----------
+def _md_link_parts(line: str) -> tuple[str, str]:
+    m = re.search(r"\[([^\]]+)\]\(([^)]+)\)", line or "")
+    return (m.group(1), m.group(2)) if m else ("", "")
+
+def _grab(prefix: str, text: str) -> str:
+    if prefix in (text or ""):
+        after = text.split(prefix, 1)[1]
+        return after.split("\n", 1)[0].strip()
+    return ""
+
+def parse_content_request_card(content: str) -> tuple[str, str, str, str]:
+    """
+    Returns: (requester, topic, filename, file_url)
+    From a card like:
+      📝 **Content Request from Alice**
+      📌 **Topic:** Blog on X
+      📎 **File:** [doc.pdf](https://...)
+    """
+    first = (content.split("\n", 1)[0] if content else "").strip()
+    requester = first
+    for marker in ["**Content Request from ", "Content Request from ", "📝 **Content Request from "]:
+        if marker in requester:
+            requester = requester.split(marker, 1)[1]
+            break
+    requester = requester.strip("* ").strip()
+
+    topic_line = _grab("**Topic:** ", content) or _grab("Topic:", content)
+    file_line  = _grab("**File:** ", content)  or _grab("File:", content)
+    filename, file_url = _md_link_parts(file_line)
+    return requester, topic_line, filename, file_url
+
+def parse_asset_review_card(content: str) -> tuple[str, str, str, str]:
+    """
+    Returns: (requester, asset_name, filename, file_url)
+    From a card like:
+      🧪 **Asset Review Request from Bob**
+      🏷️ **Name:** Logo v2
+      📎 **File:** [logo.png](https://...)
+    """
+    first = (content.split("\n", 1)[0] if content else "").strip()
+    requester = first
+    for marker in ["**Asset Review Request from ", "Asset Review Request from ", "🧪 **Asset Review Request from "]:
+        if marker in requester:
+            requester = requester.split(marker, 1)[1]
+            break
+    requester = requester.strip("* ").strip()
+
+    asset_name = _grab("**Name:** ", content) or _grab("Name:", content)
+    file_line  = _grab("**File:** ", content) or _grab("File:", content)
+    filename, file_url = _md_link_parts(file_line)
+    return requester, asset_name, filename, file_url
+
+# ---------- Sheets writers ----------
+def append_content_decision_row_from_card(card_content: str, decision: str, reviewer: str, comments: str = "") -> None:
+    """
+    Appends a row to 'Content Decisions' sheet:
+      [timestamp_ist, decision, reviewer, requester, topic, filename, file_url, comments]
+    """
+    requester, topic, filename, file_url = parse_content_request_card(card_content)
+    service = get_service()
+    values = [[
+        get_ist_timestamp(), decision, reviewer, requester, topic, filename, file_url, comments or ""
+    ]]
+    body = {"values": values}
+    service.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID,
+        range="'Content Decisions'!A:H",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body=body,
+    ).execute()
+
+def append_asset_decision_row_from_card(card_content: str, decision: str, reviewer: str, comments: str = "") -> None:
+    """
+    Appends a row to 'Asset Decisions' sheet:
+      [timestamp_ist, decision, reviewer, requester, asset_name, filename, file_url, comments]
+    """
+    requester, asset_name, filename, file_url = parse_asset_review_card(card_content)
+    service = get_service()
+    values = [[
+        get_ist_timestamp(), decision, reviewer, requester, asset_name, filename, file_url, comments or ""
+    ]]
+    body = {"values": values}
+    service.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID,
+        range="'Asset Decisions'!A:H",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body=body,
+    ).execute()
+
 def post_leave_status_update(name: str, from_date: str, to_date: str, reason: str,
                              decision: str, reviewer: str, fallback_channel_id: str | None):
     bot_token = BOT_TOKEN.strip()
@@ -1264,6 +1358,7 @@ async def discord_interaction(
             pr = requests.patch(patch_url, headers=headers, json={"content": new_content, "components": disabled_components}, timeout=15)
             if pr.status_code not in (200, 201):
                 print(f"❌ Failed to edit message: {pr.status_code} {pr.text}")
+            append_content_decision_row_from_card(content, decision, reviewer, comment)
             return JSONResponse({"type": 4, "data": {"content": "✅ Decision recorded.", "flags": 1 << 6}})
 
         # ---- Asset review modal submit
@@ -1304,6 +1399,7 @@ async def discord_interaction(
             pr = requests.patch(patch_url, headers=headers, json={"content": new_content, "components": disabled_components}, timeout=15)
             if pr.status_code not in (200, 201):
                 print(f"❌ Failed to edit message: {pr.status_code} {pr.text}")
+            append_asset_decision_row_from_card(content, decision, reviewer, comment)
             return JSONResponse({"type": 4, "data": {"content": "✅ Decision recorded.", "flags": 1 << 6}})
 
 
