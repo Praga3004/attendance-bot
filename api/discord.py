@@ -218,18 +218,24 @@ def get_today_status(name: str, user_id: str) -> Tuple[bool, bool]:
     has_login = has_logout = False
     for r in rows:
         if len(r) < 3:
+            print("r<3")
             continue
         if not _row_matches_user(r, name, user_id):
+            print("r,uname,user_id")
             continue
         d = _ts_cell_to_date_ist(r[0])
         if d != tday:
+            print(f"d!=tday {d} {tday}")
             continue
         a = (r[2] or "").strip().lower()
         if a == "login":
+            print("login")
             has_login = True
         elif a == "logout":
+            print("logout")
             has_logout = True
         if has_login and has_logout:
+            print("Both")
             break
     return has_login, has_logout
 def append_leave_row(name: str, from_date: str, to_date: str, reason: str) -> None:
