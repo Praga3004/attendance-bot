@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 import os, json, time, requests, re
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
+from typing import Any, Tuple, List
 
 # Discord signature verification
 import nacl.signing
@@ -25,7 +26,6 @@ app = FastAPI(title="Discord Attendance → Google Sheets")
 # ========= ENV VARS =========
 DISCORD_PUBLIC_KEY           = (os.environ.get("DISCORD_PUBLIC_KEY", "") or "").strip()
 SHEET_ID                     = (os.environ.get("SHEET_ID", "") or "").strip()
-SHEET_RANGE                  = (os.environ.get("SHEET_RANGE", "Attendance!A:C") or "").strip()
 SERVICE_ACCOUNT_JSON         = (os.environ.get("SERVICE_ACCOUNT_JSON", "") or "").strip()
 BOT_TOKEN                    = (os.environ.get("BOT_TOKEN", "") or "").strip()
 
@@ -40,16 +40,20 @@ ASSETS_REVIEWS_CHANNEL_ID    = (os.environ.get("ASSETS_REVIEWS_CHANNEL_ID", "") 
 LEAVE_REQUESTS_CHANNEL_ID    = (os.environ.get("LEAVE_REQUESTS_CHANNEL_ID", "") or "").strip()
 CONTENT_TEAM_CHANNEL_ID      = (os.environ.get("CONTENT_TEAM_CHANNEL_ID", "") or "").strip()
 
+# ========= CONSTANT SHEET RANGES =========
+# We always read/write A:E so we can store UserID + Progress
+ATTENDANCE_READ_RANGE  = "Attendance!A:E"
+ATTENDANCE_WRITE_RANGE = "Attendance!A:E"
+
 # Where each command is allowed to be invoked
 CMD_ALLOWED_CHANNELS = {
-    "leaverequest": {LEAVE_REQUESTS_CHANNEL_ID},
-    "wfh":          {LEAVE_REQUESTS_CHANNEL_ID},
-    "leavecount":   {LEAVE_REQUESTS_CHANNEL_ID},
-    "attendance":   {ATTENDANCE_CHANNEL_ID},
-    "contentrequest": {CONTENT_REQUESTS_CHANNEL_ID},  # <-- fixed
-    "assetreview":    {ASSETS_REVIEWS_CHANNEL_ID},    # <-- fixed
+    "leaverequest":  {LEAVE_REQUESTS_CHANNEL_ID},
+    "wfh":           {LEAVE_REQUESTS_CHANNEL_ID},
+    "leavecount":    {LEAVE_REQUESTS_CHANNEL_ID},
+    "attendance":    {ATTENDANCE_CHANNEL_ID},
+    "contentrequest": {CONTENT_REQUESTS_CHANNEL_ID},
+    "assetreview":    {ASSETS_REVIEWS_CHANNEL_ID},
 }
-
 CHANNEL_LABELS = {
     LEAVE_REQUESTS_CHANNEL_ID: "#leave-requests",
     ATTENDANCE_CHANNEL_ID: "#attendance",
@@ -57,36 +61,6 @@ CHANNEL_LABELS = {
     ASSETS_REVIEWS_CHANNEL_ID: "#assets-reviews",
     CONTENT_TEAM_CHANNEL_ID: "#content-team",
 }
-
-
-# ========= Small helpers =========
-def channel_allowed(cmd: str, cid: str) -> bool:
-    allowed = CMD_ALLOWED_CHANNELS.get(cmd.lower(), set())
-    return bool(cid) and cid in allowed
-
-def deny_wrong_channel(cmd: str, cid: str):
-    allowed = CMD_ALLOWED_CHANNELS.get(cmd.lower(), set())
-    where = " or ".join(CHANNEL_LABELS.get(c, f"<#{c}>") for c in allowed if c)
-    msg = f"⛔ **/{cmd}** isn’t allowed here. Use it in {where}."
-    return discord_response_message(msg, True)
-
-def _post_to_channel(cid: str, content: str):
-    if not (BOT_TOKEN and cid and content):
-        return False
-    headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
-    url = f"https://discord.com/api/v10/channels/{cid}/messages"
-    try:
-        r = requests.post(url, headers=headers, json={
-            "content": content,
-            "allowed_mentions": {"parse": []}
-        }, timeout=15)
-        r.raise_for_status()
-        return True
-    except Exception as e:
-        print(f"❌ post_to_channel({cid}) failed: {e}")
-        return False
-
-
 def _get_attachment_from_options(interaction_payload: dict, option_name: str):
     """
     Returns (filename, url, content_type, size) for the attachment option.
@@ -112,13 +86,49 @@ def _get_attachment_from_options(interaction_payload: dict, option_name: str):
         a.get("content_type"),
         a.get("size"),
     )
+def append_leave_decision_row(name: str, from_date: str, to_date: str, reason: str,
+                              decision: str, reviewer: str) -> None:
+    service = get_service()
+    values = [[get_ist_timestamp(), name, from_date, to_date, reason, decision, reviewer]]
+    body = {"values": values}
+    service.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID,
+        range="'Leave Decisions'!A:G",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body=body,
+    ).execute()
 
-def _date_opts(start: date, days: int) -> list[dict]:
-    days = max(0, min(days, 25))  # Discord limit
-    return [{
-        "label": f"{(start + timedelta(i)).isoformat()} ({(start + timedelta(i)).strftime('%a')})",
-        "value": (start + timedelta(i)).isoformat()
-    } for i in range(days)]
+# ========= Small helpers =========
+def channel_allowed(cmd: str, cid: str) -> bool:
+    allowed = CMD_ALLOWED_CHANNELS.get(cmd.lower(), set())
+    return bool(cid) and cid in allowed
+
+def deny_wrong_channel(cmd: str, cid: str):
+    allowed = [c for c in CMD_ALLOWED_CHANNELS.get(cmd.lower(), set()) if c]
+    if not allowed:
+        where = "the configured channel"
+    else:
+        where = " or ".join(CHANNEL_LABELS.get(c, f"<#{c}>") for c in allowed)
+    msg = f"⛔ **/{cmd}** isn’t allowed here. Use it in {where}."
+    return discord_response_message(msg, True)
+
+
+def _post_to_channel(cid: str, content: str):
+    if not (BOT_TOKEN and cid and content):
+        return False
+    headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+    url = f"https://discord.com/api/v10/channels/{cid}/messages"
+    try:
+        r = requests.post(url, headers=headers, json={
+            "content": content,
+            "allowed_mentions": {"parse": []}
+        }, timeout=15)
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"❌ post_to_channel({cid}) failed: {e}")
+        return False
 
 # ========= CORE HELPERS =========
 def verify_signature(signature: str, timestamp: str, body: bytes) -> bool:
@@ -156,69 +166,99 @@ def discord_response_message(content: str, ephemeral: bool = True) -> JSONRespon
         data["flags"] = 1 << 6  # ephemeral flag = 64
     return JSONResponse({"type": 4, "data": data})
 
-# ========= ATTENDANCE =========
-def fetch_attendance_rows() -> list[list[str]]:
-    service = get_service()
-    resp = service.spreadsheets().values().get(
-        spreadsheetId=SHEET_ID, range="Attendance!A:C"
-    ).execute()
-    return resp.get("values", []) or []
+# ========= Timestamp parsing (supports Google Sheets serials) =========
+_SHEETS_EPOCH = datetime(1899, 12, 30)  # Google Sheets epoch (day 0)
 
-def _ts_to_date_ist(ts_str: str) -> date | None:
-    if not ts_str:
+def _sheets_serial_to_dt_ist(value: Any) -> datetime | None:
+    """Convert Google Sheets numeric date/time serial -> IST-aware datetime."""
+    try:
+        days = float(value)
+    except (TypeError, ValueError):
         return None
+    dt = _SHEETS_EPOCH + timedelta(days=days)
+    return dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+
+def _ts_cell_to_date_ist(ts_val: Any) -> date | None:
+    """
+    Accepts either a serial (e.g., 45942.58), or text like '2025-10-12 13:57:36' / '2025-10-12'.
+    Returns IST date.
+    """
+    dt = _sheets_serial_to_dt_ist(ts_val)
+    if dt:
+        return dt.date()
+    s = ("" if ts_val is None else str(ts_val)).strip()
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(ts_str.strip()[:len(fmt)], fmt).date()
+            naive = datetime.strptime(s[:len(fmt)], fmt)
+            return naive.date()
         except Exception:
             continue
     return None
 
-def get_today_actions_for_name(name: str) -> set[str]:
-    rows = fetch_attendance_rows()
-    actions = set()
-    tday = today_ist_date()
-    for r in rows:
-        if len(r) < 3:  # ts, name, action
-            continue
-        ts, n, action = (r[0] or ""), (r[1] or ""), (r[2] or "")
-        if not n or not action:
-            continue
-        if n.strip().lower() != name.strip().lower():
-            continue
-        d = _ts_to_date_ist(ts)
-        if d == tday:
-            a = action.strip().lower()
-            if a == "login":
-                actions.add("Login")
-            elif a == "logout":
-                actions.add("Logout")
-    return actions
-
-def append_attendance_row(name: str, action: str) -> None:
+# ========= ATTENDANCE =========
+def fetch_attendance_rows() -> List[List[str]]:
     service = get_service()
-    values = [[get_ist_timestamp(), name, action]]
+    resp = service.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID, range=ATTENDANCE_READ_RANGE
+    ).execute()
+    return resp.get("values", []) or []
+
+def _row_matches_user(row: List[str], target_name: str, target_user_id: str) -> bool:
+    # row: [ts, name, action, user_id?, progress?]
+    uid = (row[3] if len(row) > 3 else "").strip()
+    nm  = (row[1] if len(row) > 1 else "").strip()
+    if uid and target_user_id:
+        return uid == target_user_id
+    return (nm or "").strip().lower() == (target_name or "").strip().lower()
+
+def get_today_status(name: str, user_id: str) -> Tuple[bool, bool]:
+    """Returns (has_login_today, has_logout_today) for this user."""
+    rows = fetch_attendance_rows()
+    tday = today_ist_date()
+    has_login = has_logout = False
+    for r in rows:
+        if len(r) < 3:
+            continue
+        if not _row_matches_user(r, name, user_id):
+            continue
+        d = _ts_cell_to_date_ist(r[0])
+        if d != tday:
+            continue
+        a = (r[2] or "").strip().lower()
+        if a == "login":
+            has_login = True
+        elif a == "logout":
+            has_logout = True
+        if has_login and has_logout:
+            break
+    return has_login, has_logout
+def append_leave_row(name: str, from_date: str, to_date: str, reason: str) -> None:
+    service = get_service()
+    values = [[get_ist_timestamp(), name, from_date, to_date, reason]]
     body = {"values": values}
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
-        range=SHEET_RANGE,
+        range="'Leave Requests'!A:E",
         valueInputOption="USER_ENTERED",
         insertDataOption="INSERT_ROWS",
         body=body,
     ).execute()
+def append_attendance_row(name: str, action: str, user_id: str, progress: str | None = None) -> None:
+    """
+    Writes: [=NOW(), name, action, user_id, progress]
+    """
+    service = get_service()
+    values = [["=NOW()", name, action, user_id or "", (progress or "").strip()]]
+    body = {"values": values}
+    service.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID,
+        range=ATTENDANCE_WRITE_RANGE,
+        valueInputOption="USER_ENTERED",       # evaluate =NOW() in sheet's TZ
+        insertDataOption="INSERT_ROWS",
+        body=body,
+    ).execute()
 
-def record_attendance_auto(name: str) -> tuple[str | None, str]:
-    acts = get_today_actions_for_name(name)
-    if "Login" in acts and "Logout" in acts:
-        return None, "ℹ️ Already logged **Login** and **Logout** for today."
-    elif "Login" in acts:
-        append_attendance_row(name, "Logout")
-        return "Logout", "✅ Recorded **Logout** for today."
-    else:
-        append_attendance_row(name, "Login")
-        return "Login", "✅ Recorded **Login** for today."
-
-def broadcast_attendance(name: str, action: str, user_id: str, fallback_channel_id: str | None):
+def broadcast_attendance(name: str, action: str, user_id: str, fallback_channel_id: str | None, progress: str | None = None):
     if not BOT_TOKEN:
         return False
     channel_id = (ATTENDANCE_CHANNEL_ID or (fallback_channel_id or ""))
@@ -233,9 +273,11 @@ def broadcast_attendance(name: str, action: str, user_id: str, fallback_channel_
         f"{icon} **Attendance**\n"
         f"👤 {user_ping} — **{name}**\n"
         f"🕒 {get_ist_timestamp()} IST\n"
-        f"📝 Action: **{action}**\n"
-        f"{role_ping} please take note."
+        f"📝 Action: **{action}**"
     )
+    if action.lower() == "logout" and (progress or "").strip():
+        content += f"\n📈 **Daily Progress:** {progress.strip()}"
+    content += f"\n{role_ping} please take note."
 
     headers = {
         "Authorization": f"Bot {BOT_TOKEN}",
@@ -275,6 +317,8 @@ def broadcast_attendance(name: str, action: str, user_id: str, fallback_channel_
                     f"🕒 {get_ist_timestamp()} IST\n"
                     f"Action: **{action}**"
                 )
+                if action.lower() == "logout" and (progress or "").strip():
+                    dm_msg += f"\n📈 Progress: {progress.strip()}"
                 requests.post(
                     f"https://discord.com/api/v10/channels/{dm_ch}/messages",
                     headers=headers,
@@ -285,33 +329,7 @@ def broadcast_attendance(name: str, action: str, user_id: str, fallback_channel_
         print(f"⚠️ Attendance DM failed: {e}")
     return True
 
-# ========= LEAVE =========
-def append_leave_row(name: str, from_date: str, to_date: str, reason: str) -> None:
-    service = get_service()
-    values = [[get_ist_timestamp(), name, from_date, to_date, reason]]
-    body = {"values": values}
-    service.spreadsheets().values().append(
-        spreadsheetId=SHEET_ID,
-        range="'Leave Requests'!A:E",
-        valueInputOption="USER_ENTERED",
-        insertDataOption="INSERT_ROWS",
-        body=body,
-    ).execute()
-
-def append_leave_decision_row(name: str, from_date: str, to_date: str, reason: str,
-                              decision: str, reviewer: str) -> None:
-    service = get_service()
-    values = [[get_ist_timestamp(), name, from_date, to_date, reason, decision, reviewer]]
-    body = {"values": values}
-    service.spreadsheets().values().append(
-        spreadsheetId=SHEET_ID,
-        range="'Leave Decisions'!A:G",
-        valueInputOption="USER_ENTERED",
-        insertDataOption="INSERT_ROWS",
-        body=body,
-    ).execute()
-
-# ---------- Parsers (from the card text you post) ----------
+# ========= LEAVE / WFH & Content/Asset helpers (unchanged logic from your last file) =========
 def _md_link_parts(line: str) -> tuple[str, str]:
     m = re.search(r"\[([^\]]+)\]\(([^)]+)\)", line or "")
     return (m.group(1), m.group(2)) if m else ("", "")
@@ -323,13 +341,6 @@ def _grab(prefix: str, text: str) -> str:
     return ""
 
 def parse_content_request_card(content: str) -> tuple[str, str, str, str]:
-    """
-    Returns: (requester, topic, filename, file_url)
-    From a card like:
-      📝 **Content Request from Alice**
-      📌 **Topic:** Blog on X
-      📎 **File:** [doc.pdf](https://...)
-    """
     first = (content.split("\n", 1)[0] if content else "").strip()
     requester = first
     for marker in ["**Content Request from ", "Content Request from ", "📝 **Content Request from "]:
@@ -344,13 +355,6 @@ def parse_content_request_card(content: str) -> tuple[str, str, str, str]:
     return requester, topic_line, filename, file_url
 
 def parse_asset_review_card(content: str) -> tuple[str, str, str, str]:
-    """
-    Returns: (requester, asset_name, filename, file_url)
-    From a card like:
-      🧪 **Asset Review Request from Bob**
-      🏷️ **Name:** Logo v2
-      📎 **File:** [logo.png](https://...)
-    """
     first = (content.split("\n", 1)[0] if content else "").strip()
     requester = first
     for marker in ["**Asset Review Request from ", "Asset Review Request from ", "🧪 **Asset Review Request from "]:
@@ -364,12 +368,7 @@ def parse_asset_review_card(content: str) -> tuple[str, str, str, str]:
     filename, file_url = _md_link_parts(file_line)
     return requester, asset_name, filename, file_url
 
-# ---------- Sheets writers ----------
 def append_content_decision_row_from_card(card_content: str, decision: str, reviewer: str, comments: str = "") -> None:
-    """
-    Appends a row to 'Content Decisions' sheet:
-      [timestamp_ist, decision, reviewer, requester, topic, filename, file_url, comments]
-    """
     requester, topic, filename, file_url = parse_content_request_card(card_content)
     service = get_service()
     values = [[
@@ -385,10 +384,6 @@ def append_content_decision_row_from_card(card_content: str, decision: str, revi
     ).execute()
 
 def append_asset_decision_row_from_card(card_content: str, decision: str, reviewer: str, comments: str = "") -> None:
-    """
-    Appends a row to 'Asset Decisions' sheet:
-      [timestamp_ist, decision, reviewer, requester, asset_name, filename, file_url, comments]
-    """
     requester, asset_name, filename, file_url = parse_asset_review_card(card_content)
     service = get_service()
     values = [[
@@ -447,14 +442,14 @@ def _overlap_days(d1s: date, d1e: date, d2s: date, d2e: date) -> int:
     lo, hi = max(d1s, d2s), min(d1e, d2e)
     return 0 if lo > hi else (hi - lo).days + 1
 
-def fetch_leave_decisions_rows() -> list[list[str]]:
+def fetch_leave_decisions_rows() -> List[List[str]]:
     service = get_service()
     resp = service.spreadsheets().values().get(
         spreadsheetId=SHEET_ID, range="'Leave Decisions'!A:G"
     ).execute()
     return resp.get("values", []) or []
 
-def count_user_leaves_current_month(target_name: str) -> tuple[int, int, list[tuple[date, date, int]]]:
+def count_user_leaves_current_month(target_name: str) -> tuple[int, int, List[tuple[date, date, int]]]:
     rows = fetch_leave_decisions_rows()
     if not rows:
         return 0, 0, []
@@ -466,7 +461,7 @@ def count_user_leaves_current_month(target_name: str) -> tuple[int, int, list[tu
 
     month_start, month_end = _month_bounds_ist()
     req_count = total_days = 0
-    details = []
+    details: List[tuple[date, date, int]] = []
     for r in rows[start_idx:]:
         if len(r) < 6:
             continue
@@ -590,6 +585,13 @@ def send_wfh_date_picker(channel_id: str):
     r.raise_for_status()
     return True
 
+def _date_opts(start: date, days: int) -> List[dict]:
+    days = max(0, min(days, 25))  # Discord limit
+    return [{
+        "label": f"{(start + timedelta(i)).isoformat()} ({(start + timedelta(i)).strftime('%a')})",
+        "value": (start + timedelta(i)).isoformat()
+    } for i in range(days)]
+
 def _grab_between(prefix: str, text: str) -> str:
     if prefix in text:
         after = text.split(prefix, 1)[1]
@@ -597,13 +599,6 @@ def _grab_between(prefix: str, text: str) -> str:
     return ""
 
 def parse_wfh_card(content: str) -> tuple[str, str, str]:
-    """
-    Parses a WFH request card text you posted earlier, expected lines like:
-    '🏠 **WFH Request from Alice**'
-    '📅 **Date:** 2025-10-11'
-    '💬 **Reason:** Internet installation'
-    Returns: (name, date_str, reason)
-    """
     first = (content.split("\n", 1)[0] if content else "").strip()
     name = first
     for m in ["**WFH Request from ", "WFH Request from ", "🏠 **WFH Request from "]:
@@ -665,7 +660,7 @@ async def discord_interaction(
         if cmd_name == "leaverequest" and focused:
             channel_id = payload.get("channel_id", "")
             if not channel_allowed(cmd_name, channel_id):
-                return deny_wrong_channel(cmd_name, channel_id)
+                return JSONResponse({"type": 8, "data": {"choices": []}})
 
             fname = focused.get("name")
             opts_map = {o.get("name"): (o.get("value") or "") for o in (data.get("options") or [])}
@@ -706,18 +701,52 @@ async def discord_interaction(
         if cmd_name == "attendance":
             if not channel_allowed(cmd_name, channel_id):
                 return deny_wrong_channel(cmd_name, channel_id)
+
             member = payload.get("member", {}) or {}
             user = member.get("user", {}) or payload.get("user", {}) or {}
+            user_id = (user.get("id") or "").strip()
             name = (user.get("global_name") or user.get("username") or "Unknown").strip()
+
             try:
-                action_taken, info = record_attendance_auto(name=name)
-                if action_taken is not None:
-                    user_id = (user.get("id") or "").strip()
-                    broadcast_attendance(name=name, action=action_taken, user_id=user_id,
-                                         fallback_channel_id=channel_id)
+                has_login, has_logout = get_today_status(name, user_id)
             except Exception as e:
-                return discord_response_message(f"❌ Failed to record attendance. {type(e).__name__}: {e}", True)
-            return discord_response_message(f"{info}\n👤 **{name}** • 🕒 **{get_ist_timestamp()} IST**", True)
+                return discord_response_message(f"❌ Could not read attendance. {type(e).__name__}: {e}", True)
+
+            # 1) no login yet -> record LOGIN
+            if not has_login:
+                try:
+                    append_attendance_row(name=name, action="Login", user_id=user_id)
+                    broadcast_attendance(name=name, action="Login", user_id=user_id, fallback_channel_id=channel_id)
+                except Exception as e:
+                    return discord_response_message(f"❌ Failed to record login. {type(e).__name__}: {e}", True)
+                return discord_response_message(f"🟢 ✅ Recorded **Login** for **{name}** • 🕒 {get_ist_timestamp()} IST", True)
+
+            # 2) login exists, no logout -> open modal for progress, then record LOGOUT on submit
+            if has_login and not has_logout:
+                modal_id = f"att_logout_progress::{user_id}"
+                return JSONResponse({
+                    "type": 9,  # MODAL
+                    "data": {
+                        "custom_id": modal_id,
+                        "title": "Daily progress (required for logout)",
+                        "components": [{
+                            "type": 1,
+                            "components": [{
+                                "type": 4,  # TEXT_INPUT
+                                "custom_id": "progress_text",
+                                "style": 2,  # PARAGRAPH
+                                "label": "What did you complete today?",
+                                "min_length": 1,
+                                "max_length": 2000,
+                                "required": True,
+                                "placeholder": "Tasks done, blockers, key updates…"
+                            }]
+                        }]
+                    }
+                })
+
+            # 3) already both recorded
+            return discord_response_message("ℹ️ You’ve already recorded **Login** and **Logout** for today.", True)
 
         # ----- CONTENT REQUEST -----
         if cmd_name == "contentrequest":
@@ -977,7 +1006,7 @@ async def discord_interaction(
                 True
             )
 
-        # ----- SCHEDULE MEET (optional) -----
+        # ----- SCHEDULE MEET -----
         if cmd_name == "schedulemeet":
             if not channel_allowed(cmd_name, channel_id):
                 return deny_wrong_channel(cmd_name, channel_id)
@@ -1260,22 +1289,52 @@ async def discord_interaction(
             "data": {"content": f"Unsupported action for button id `{custom_id}`.", "flags": 1 << 6}
         })
 
-    # 4) MODAL_SUBMIT (Leave/Content/Asset/WFH reject flows)
+    # 4) MODAL_SUBMIT (Attendance Logout, Leave/Content/Asset/WFH reject flows)
     if t == 5:
         data = payload.get("data", {}) or {}
         modal_custom_id = data.get("custom_id", "")
         comps = data.get("components", []) or []
 
+        # Reviewer / actor (for attendance logout it's the same person)
+        member = payload.get("member", {}) or {}
+        user = member.get("user", {}) or payload.get("user", {}) or {}
+        reviewer = (user.get("global_name") or user.get("username") or "Unknown").strip()
+        user_id = (user.get("id") or "").strip()
+        channel_id = payload.get("channel_id", "")
+
+        # ===== Attendance: logout progress modal =====
+        if modal_custom_id.startswith("att_logout_progress::"):
+            _, expected_uid = modal_custom_id.split("::", 1)
+            if expected_uid and expected_uid != user_id:
+                return JSONResponse({"type": 4, "data": {"content": "❌ This modal isn’t for you.", "flags": 1 << 6}})
+        
+            progress = ""
+            try:
+                progress = comps[0]["components"][0]["value"].strip()
+            except Exception:
+                progress = ""
+
+            # Double-check state (avoid duplicates)
+            has_login, has_logout = get_today_status(reviewer, user_id)
+            if not has_login:
+                return JSONResponse({"type": 4, "data": {"content": "⚠️ No **Login** found for today. Please log in first.", "flags": 1 << 6}})
+            if has_logout:
+                return JSONResponse({"type": 4, "data": {"content": "ℹ️ **Logout** already recorded for today.", "flags": 1 << 6}})
+
+            try:
+                append_attendance_row(name=reviewer, action="Logout", user_id=user_id, progress=progress)
+                broadcast_attendance(name=reviewer, action="Logout", user_id=user_id, fallback_channel_id=channel_id, progress=progress)
+            except Exception as e:
+                return JSONResponse({"type": 4, "data": {"content": f"❌ Failed to record logout. {type(e).__name__}: {e}", "flags": 1 << 6}})
+            return JSONResponse({"type": 4, "data": {"content": "🔴 ✅ **Logout** recorded with your daily progress. Have a good one!", "flags": 1 << 6}})
+
+        # ===== The rest reuse your existing flows =====
+        # Content/Asset/WFH/Leave modals
         reject_note = ""
         try:
             reject_note = comps[0]["components"][0]["value"].strip()
         except Exception:
             pass
-
-        # Reviewer
-        member = payload.get("member", {}) or {}
-        user = member.get("user", {}) or payload.get("user", {}) or {}
-        reviewer = (user.get("global_name") or user.get("username") or "Unknown").strip()
 
         # Leave rejection modal
         if modal_custom_id.startswith("reject_reason::"):
@@ -1384,19 +1443,15 @@ async def discord_interaction(
 
             # Also notify content-team
             if CONTENT_TEAM_CHANNEL_ID:
+                req, topic, filename, file_url = parse_content_request_card(content)
                 team_msg = (
                     "📣 **Content Request Decision**\n"
                     f"🧑‍💼 **Reviewer:** {reviewer}\n"
                     f"✅❌ **Decision:** {decision}"
                     + (f"\n📝 **Comments:** {comment}" if comment else "")
-                )
-                # Include parsed request details
-                req, topic, filename, file_url = parse_content_request_card(content)
-                team_msg = (
-                    f"{team_msg}\n"
-                    f"👤 **Requester:** {req}\n"
-                    f"📌 **Topic:** {topic}\n"
-                    f"📎 **File:** [{filename}]({file_url})"
+                    + f"\n👤 **Requester:** {req}"
+                    + f"\n📌 **Topic:** {topic}"
+                    + f"\n📎 **File:** [{filename}]({file_url})"
                 )
                 _post_to_channel(CONTENT_TEAM_CHANNEL_ID, team_msg)
 
@@ -1508,50 +1563,50 @@ async def discord_interaction(
         # Leave modal (reason after selecting To)
         if modal_custom_id.startswith("leave_reason::"):
             _, from_date, to_date = (modal_custom_id.split("::") + ["", "", ""])[:3]
-            comps = data.get("components", []) or []
+            comps2 = data.get("components", []) or []
             reason_text = ""
             try:
-                reason_text = comps[0]["components"][0]["value"].strip()
+                reason_text = comps2[0]["components"][0]["value"].strip()
             except Exception:
                 pass
 
-            member = payload.get("member", {}) or {}
-            user = member.get("user", {}) or payload.get("user", {}) or {}
-            name = (user.get("global_name") or user.get("username") or "Unknown").strip()
+            member2 = payload.get("member", {}) or {}
+            user2 = member2.get("user", {}) or payload.get("user", {}) or {}
+            name2 = (user2.get("global_name") or user2.get("username") or "Unknown").strip()
 
             try:
-                append_leave_row(name=name, from_date=from_date, to_date=to_date, reason=reason_text or "")
+                append_leave_row(name=name2, from_date=from_date, to_date=to_date, reason=reason_text or "")
                 if BOT_TOKEN:
-                    content = (
-                        f"📩 **Leave Request from {name}**\n"
+                    content2 = (
+                        f"📩 **Leave Request from {name2}**\n"
                         f"🗓️ **From:** {from_date}\n"
                         f"🗓️ **To:** {to_date}\n"
                         f"💬 **Reason:** {reason_text or '(not provided)'}\n\n"
                         f"Please review and respond accordingly."
                     )
-                    components = [{
+                    components2 = [{
                         "type": 1,
                         "components": [
                             {"type": 2, "style": 3, "label": "Approve", "custom_id": "leave_approve"},
                             {"type": 2, "style": 4, "label": "Reject",  "custom_id": "leave_reject"}
                         ]
                     }]
-                    headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
-                    def post_to_channel(cid: str):
-                        url = f"https://discord.com/api/v10/channels/{cid}/messages"
-                        r = requests.post(url, headers=headers, json={"content": content, "components": components}, timeout=15)
-                        r.raise_for_status()
+                    headers2 = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+                    def post_to_channel2(cid: str):
+                        url2 = f"https://discord.com/api/v10/channels/{cid}/messages"
+                        r2 = requests.post(url2, headers=headers2, json={"content": content2, "components": components2}, timeout=15)
+                        r2.raise_for_status()
                     if APPROVER_CHANNEL_ID:
-                        post_to_channel(APPROVER_CHANNEL_ID)
+                        post_to_channel2(APPROVER_CHANNEL_ID)
                     elif APPROVER_USER_ID:
                         dm = requests.post("https://discord.com/api/v10/users/@me/channels",
-                                           headers=headers, json={"recipient_id": APPROVER_USER_ID}, timeout=15)
+                                           headers=headers2, json={"recipient_id": APPROVER_USER_ID}, timeout=15)
                         dm.raise_for_status()
                         dm_ch = dm.json().get("id")
-                        if dm_ch: post_to_channel(dm_ch)
+                        if dm_ch: post_to_channel2(dm_ch)
                     else:
-                        ch_id = payload.get("channel_id")
-                        if ch_id: post_to_channel(ch_id)
+                        ch_id2 = payload.get("channel_id")
+                        if ch_id2: post_to_channel2(ch_id2)
             except Exception as e:
                 return JSONResponse({"type": 4, "data": {"content": f"❌ Failed to record leave. {type(e).__name__}: {e}", "flags": 1 << 6}})
 
