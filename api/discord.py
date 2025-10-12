@@ -1,7 +1,9 @@
 # api/discord.py
+from __future__ import annotations
+
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
-import os, json, time, requests
+import os, json, time, requests, re
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 
@@ -21,55 +23,57 @@ load_dotenv(r"../.env")
 app = FastAPI(title="Discord Attendance → Google Sheets")
 
 # ========= ENV VARS =========
-DISCORD_PUBLIC_KEY      = os.environ.get("DISCORD_PUBLIC_KEY", "")
-CONTENT_TEAM_CHANNEL_ID = os.environ.get("CONTENT_TEAM_CHANNEL_ID", "")
-SHEET_ID                = os.environ.get("SHEET_ID", "")
-SHEET_RANGE             = os.environ.get("SHEET_RANGE", "Attendance!A:C")
-SERVICE_ACCOUNT_JSON    = os.environ.get("SERVICE_ACCOUNT_JSON", "")
-BOT_TOKEN               = os.environ.get("BOT_TOKEN", "")
-APPROVER_CHANNEL_ID     = os.environ.get("APPROVER_CHANNEL_ID", "")
-APPROVER_USER_ID        = os.environ.get("APPROVER_USER_ID", "")
-LEAVE_STATUS_CHANNEL_ID = os.environ.get("LEAVE_STATUS_CHANNEL_ID", "")
-HR_ROLE_ID              = os.environ.get("HR_ROLE_ID", "")
-ATTENDANCE_CHANNEL_ID   = os.environ.get("ATTENDANCE_CHANNEL_ID", "")
-CONTENT_REQUESTS_CHANNEL_ID = os.environ.get("CONTENT_REQUESTS_CHANNEL_ID", "")
-ASSETS_REVIEWS_CHANNEL_ID   = os.environ.get("ASSETS_REVIEWS_CHANNEL_ID", "")
-LEAVE_REQUESTS_CHANNEL_ID = os.environ.get("LEAVE_REQUESTS_CHANNEL_ID","").strip()
-CONTENT_TEAM_CHANNEL_ID   = os.environ.get("CONTENT_TEAM_CHANNEL_ID","").strip()
+DISCORD_PUBLIC_KEY           = (os.environ.get("DISCORD_PUBLIC_KEY", "") or "").strip()
+SHEET_ID                     = (os.environ.get("SHEET_ID", "") or "").strip()
+SHEET_RANGE                  = (os.environ.get("SHEET_RANGE", "Attendance!A:C") or "").strip()
+SERVICE_ACCOUNT_JSON         = (os.environ.get("SERVICE_ACCOUNT_JSON", "") or "").strip()
+BOT_TOKEN                    = (os.environ.get("BOT_TOKEN", "") or "").strip()
 
+# Channels / roles
+APPROVER_CHANNEL_ID          = (os.environ.get("APPROVER_CHANNEL_ID", "") or "").strip()
+APPROVER_USER_ID             = (os.environ.get("APPROVER_USER_ID", "") or "").strip()
+LEAVE_STATUS_CHANNEL_ID      = (os.environ.get("LEAVE_STATUS_CHANNEL_ID", "") or "").strip()
+HR_ROLE_ID                   = (os.environ.get("HR_ROLE_ID", "") or "").strip()
+ATTENDANCE_CHANNEL_ID        = (os.environ.get("ATTENDANCE_CHANNEL_ID", "") or "").strip()
+CONTENT_REQUESTS_CHANNEL_ID  = (os.environ.get("CONTENT_REQUESTS_CHANNEL_ID", "") or "").strip()
+ASSETS_REVIEWS_CHANNEL_ID    = (os.environ.get("ASSETS_REVIEWS_CHANNEL_ID", "") or "").strip()
+LEAVE_REQUESTS_CHANNEL_ID    = (os.environ.get("LEAVE_REQUESTS_CHANNEL_ID", "") or "").strip()
+CONTENT_TEAM_CHANNEL_ID      = (os.environ.get("CONTENT_TEAM_CHANNEL_ID", "") or "").strip()
+
+# Where each command is allowed to be invoked
 CMD_ALLOWED_CHANNELS = {
     "leaverequest": {LEAVE_REQUESTS_CHANNEL_ID},
-    "wfh":           {LEAVE_REQUESTS_CHANNEL_ID},
-    "leavecount":    {LEAVE_REQUESTS_CHANNEL_ID},
-    "attendance":    {ATTENDANCE_CHANNEL_ID},
-    "contentreview": {CONTENT_TEAM_CHANNEL_ID},
-    "assetreview":   {CONTENT_TEAM_CHANNEL_ID},
+    "wfh":          {LEAVE_REQUESTS_CHANNEL_ID},
+    "leavecount":   {LEAVE_REQUESTS_CHANNEL_ID},
+    "attendance":   {ATTENDANCE_CHANNEL_ID},
+    "contentrequest": {CONTENT_REQUESTS_CHANNEL_ID},  # <-- fixed
+    "assetreview":    {ASSETS_REVIEWS_CHANNEL_ID},    # <-- fixed
 }
 
 CHANNEL_LABELS = {
     LEAVE_REQUESTS_CHANNEL_ID: "#leave-requests",
     ATTENDANCE_CHANNEL_ID: "#attendance",
+    CONTENT_REQUESTS_CHANNEL_ID: "#content-requests",
+    ASSETS_REVIEWS_CHANNEL_ID: "#assets-reviews",
     CONTENT_TEAM_CHANNEL_ID: "#content-team",
 }
 
 
+# ========= Small helpers =========
 def channel_allowed(cmd: str, cid: str) -> bool:
     allowed = CMD_ALLOWED_CHANNELS.get(cmd.lower(), set())
     return bool(cid) and cid in allowed
 
 def deny_wrong_channel(cmd: str, cid: str):
     allowed = CMD_ALLOWED_CHANNELS.get(cmd.lower(), set())
-    # Build a friendly hint listing where it IS allowed
     where = " or ".join(CHANNEL_LABELS.get(c, f"<#{c}>") for c in allowed if c)
-    msg = f"⛔ **{cmd}** isn’t allowed here. Use it in {where}."
+    msg = f"⛔ **/{cmd}** isn’t allowed here. Use it in {where}."
     return discord_response_message(msg, True)
 
-
 def _post_to_channel(cid: str, content: str):
-    bot_token = BOT_TOKEN.strip()
-    if not (bot_token and cid and content):
+    if not (BOT_TOKEN and cid and content):
         return False
-    headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
     url = f"https://discord.com/api/v10/channels/{cid}/messages"
     try:
         r = requests.post(url, headers=headers, json={
@@ -81,33 +85,6 @@ def _post_to_channel(cid: str, content: str):
     except Exception as e:
         print(f"❌ post_to_channel({cid}) failed: {e}")
         return False
-def _decision_footer(decision: str, reviewer: str) -> str:
-    return f"\n\n**Status:** {decision} by **{reviewer}** at **{get_ist_timestamp()} IST**"
-
-def content_decision_message_for_team(card_content: str, decision: str, reviewer: str, comments: str) -> str:
-    requester, topic, filename, file_url = parse_content_request_card(card_content)
-    return (
-        f"📣 **Content Request Decision**\n"
-        f"👤 **Requester:** {requester}\n"
-        f"📌 **Topic:** {topic}\n"
-        f"📎 **File:** [{filename}]({file_url})\n"
-        f"🧑‍💼 **Reviewer:** {reviewer}\n"
-        f"✅❌ **Decision:** {decision}"
-        + (f"\n📝 **Comments:** {comments}" if comments else "")
-    )
-
-def asset_decision_message_for_team(card_content: str, decision: str, reviewer: str, comments: str) -> str:
-    requester, asset_name, filename, file_url = parse_asset_review_card(card_content)
-    return (
-        f"📣 **Asset Review Decision**\n"
-        f"👤 **Requester:** {requester}\n"
-        f"🏷️ **Asset:** {asset_name}\n"
-        f"📎 **File:** [{filename}]({file_url})\n"
-        f"🧑‍💼 **Reviewer:** {reviewer}\n"
-        f"✅❌ **Decision:** {decision}"
-        + (f"\n📝 **Comments:** {comments}" if comments else "")
-    )
-
 
 
 def _get_attachment_from_options(interaction_payload: dict, option_name: str):
@@ -142,6 +119,7 @@ def _date_opts(start: date, days: int) -> list[dict]:
         "label": f"{(start + timedelta(i)).isoformat()} ({(start + timedelta(i)).strftime('%a')})",
         "value": (start + timedelta(i)).isoformat()
     } for i in range(days)]
+
 # ========= CORE HELPERS =========
 def verify_signature(signature: str, timestamp: str, body: bytes) -> bool:
     if not DISCORD_PUBLIC_KEY:
@@ -241,14 +219,13 @@ def record_attendance_auto(name: str) -> tuple[str | None, str]:
         return "Login", "✅ Recorded **Login** for today."
 
 def broadcast_attendance(name: str, action: str, user_id: str, fallback_channel_id: str | None):
-    bot_token = BOT_TOKEN.strip()
-    if not bot_token:
+    if not BOT_TOKEN:
         return False
-    channel_id = (ATTENDANCE_CHANNEL_ID.strip() or (fallback_channel_id or "").strip())
+    channel_id = (ATTENDANCE_CHANNEL_ID or (fallback_channel_id or ""))
     if not channel_id:
         return False
 
-    role_ping = f"<@&{HR_ROLE_ID.strip()}>" if HR_ROLE_ID.strip() else "HR"
+    role_ping = f"<@&{HR_ROLE_ID}>" if HR_ROLE_ID else "HR"
     user_ping = f"<@{user_id}>" if user_id else name
     icon = "🟢" if action.lower() == "login" else "🔴"
 
@@ -261,7 +238,7 @@ def broadcast_attendance(name: str, action: str, user_id: str, fallback_channel_
     )
 
     headers = {
-        "Authorization": f"Bot {bot_token}",
+        "Authorization": f"Bot {BOT_TOKEN}",
         "Content-Type": "application/json",
         "User-Agent": "DiscordBot (https://example.com, 1.0)",
     }
@@ -272,7 +249,7 @@ def broadcast_attendance(name: str, action: str, user_id: str, fallback_channel_
             "content": content,
             "allowed_mentions": {
                 "parse": [],
-                "roles": [HR_ROLE_ID] if HR_ROLE_ID.strip() else [],
+                "roles": [HR_ROLE_ID] if HR_ROLE_ID else [],
                 "users": [user_id] if user_id else [],
             },
         }
@@ -333,8 +310,6 @@ def append_leave_decision_row(name: str, from_date: str, to_date: str, reason: s
         insertDataOption="INSERT_ROWS",
         body=body,
     ).execute()
-
-import re
 
 # ---------- Parsers (from the card text you post) ----------
 def _md_link_parts(line: str) -> tuple[str, str]:
@@ -430,11 +405,8 @@ def append_asset_decision_row_from_card(card_content: str, decision: str, review
 
 def post_leave_status_update(name: str, from_date: str, to_date: str, reason: str,
                              decision: str, reviewer: str, fallback_channel_id: str | None):
-    bot_token = BOT_TOKEN.strip()
-    status_channel_id = (LEAVE_STATUS_CHANNEL_ID.strip()
-                         or APPROVER_CHANNEL_ID.strip()
-                         or (fallback_channel_id or "").strip())
-    if not bot_token or not status_channel_id:
+    status_channel_id = (LEAVE_STATUS_CHANNEL_ID or APPROVER_CHANNEL_ID or (fallback_channel_id or ""))
+    if not (BOT_TOKEN and status_channel_id):
         return False
     icon = "✅" if decision.lower() == "approved" else "❌"
     content = (
@@ -445,7 +417,7 @@ def post_leave_status_update(name: str, from_date: str, to_date: str, reason: st
         f"💬 **Reason:** {reason}\n"
         f"🧑‍💼 **Reviewer:** {reviewer} — **{get_ist_timestamp()} IST**"
     )
-    headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
     url = f"https://discord.com/api/v10/channels/{status_channel_id}/messages"
     try:
         r = requests.post(url, headers=headers, json={"content": content}, timeout=15)
@@ -545,11 +517,8 @@ def append_wfh_decision_row(name: str, day: str, reason: str,
 
 def post_wfh_status_update(name: str, day: str, reason: str,
                            decision: str, reviewer: str, fallback_channel_id: str | None):
-    bot_token = BOT_TOKEN.strip()
-    status_channel_id = (LEAVE_STATUS_CHANNEL_ID.strip()
-                         or APPROVER_CHANNEL_ID.strip()
-                         or (fallback_channel_id or "").strip())
-    if not bot_token or not status_channel_id:
+    status_channel_id = (LEAVE_STATUS_CHANNEL_ID or APPROVER_CHANNEL_ID or (fallback_channel_id or ""))
+    if not (BOT_TOKEN and status_channel_id):
         return False
     icon = "🏠✅" if decision.lower() == "approved" else "🏠❌"
     content = (
@@ -559,7 +528,7 @@ def post_wfh_status_update(name: str, day: str, reason: str,
         f"💬 **Reason:** {reason}\n"
         f"🧑‍💼 **Reviewer:** {reviewer} — **{get_ist_timestamp()} IST**"
     )
-    headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
     url = f"https://discord.com/api/v10/channels/{status_channel_id}/messages"
     try:
         r = requests.post(url, headers=headers, json={"content": content}, timeout=15)
@@ -570,15 +539,9 @@ def post_wfh_status_update(name: str, day: str, reason: str,
         return False
 
 def send_leave_from_picker(channel_id: str) -> bool:
-    bot_token = BOT_TOKEN.strip()
-    if not (bot_token and channel_id):
+    if not (BOT_TOKEN and channel_id):
         return False
-
-    # ≤ 25 options or Discord will ignore them
     opts = _date_opts(today_ist_date(), 25)
-
-    print(f"[leave_from_picker] options={len(opts)} first={opts[0] if opts else None}")
-
     body = {
         "content": "📅 Pick the **start** date for your leave:",
         "components": [{
@@ -592,17 +555,15 @@ def send_leave_from_picker(channel_id: str) -> bool:
             }]
         }]
     }
-    headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
     url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
     r = requests.post(url, headers=headers, json=body, timeout=15)
-    print(f"POST leave_from_picker -> {r.status_code} {r.text}")
     r.raise_for_status()
     return True
 
 def send_wfh_date_picker(channel_id: str):
     """Shows a string select with next 14 days."""
-    bot_token = BOT_TOKEN.strip()
-    if not (bot_token and channel_id):
+    if not (BOT_TOKEN and channel_id):
         return False
     today = today_ist_date()
     options = []
@@ -623,10 +584,9 @@ def send_wfh_date_picker(channel_id: str):
             }]
         }]
     }
-    headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
     url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
     r = requests.post(url, headers=headers, json=body, timeout=15)
-    print(f"POST wfh date picker -> {r.status_code} {r.text}")
     r.raise_for_status()
     return True
 
@@ -691,7 +651,7 @@ async def discord_interaction(
                 focused = opt
                 break
 
-        # --- /wfh date autocomplete (you already have this) ---
+        # --- /wfh date autocomplete ---
         if cmd_name == "wfh" and focused and focused.get("name") == "date":
             now_ist = today_ist_date()
             choices = []
@@ -701,18 +661,16 @@ async def discord_interaction(
                 choices.append({"name": label, "value": d.isoformat()})
             return JSONResponse({"type": 8, "data": {"choices": choices}})
 
-        # --- /leaverequest from/to autocomplete (NEW) ---
+        # --- /leaverequest from/to autocomplete ---
         if cmd_name == "leaverequest" and focused:
-            # figure out which field is focused
             channel_id = payload.get("channel_id", "")
             if not channel_allowed(cmd_name, channel_id):
                 return deny_wrong_channel(cmd_name, channel_id)
+
             fname = focused.get("name")
-            # helper to convert option list to dict {name: value}
             opts_map = {o.get("name"): (o.get("value") or "") for o in (data.get("options") or [])}
 
             if fname == "from":
-                # next 25 days from today
                 start = today_ist_date()
                 choices = []
                 for i in range(25):
@@ -727,14 +685,13 @@ async def discord_interaction(
                     from_dt = datetime.strptime(from_str, "%Y-%m-%d").date() if from_str else today_ist_date()
                 except Exception:
                     from_dt = today_ist_date()
-                start = from_dt  # allow same-day end date
+                start = from_dt
                 choices = []
                 for i in range(25):
                     d = start + timedelta(days=i)
                     label = f"{d.isoformat()} ({d.strftime('%a')})"
                     choices.append({"name": label, "value": d.isoformat()})
                 return JSONResponse({"type": 8, "data": {"choices": choices}})
-
 
         # default: no choices
         return JSONResponse({"type": 8, "data": {"choices": []}})
@@ -743,10 +700,10 @@ async def discord_interaction(
     if t == 2:
         data = payload.get("data", {}) or {}
         cmd_name = data.get("name", "")
+        channel_id = payload.get("channel_id", "")
 
-        # ----- ATTENDANCE (NO ARGUMENTS) -----
+        # ----- ATTENDANCE -----
         if cmd_name == "attendance":
-            channel_id = payload.get("channel_id", "")
             if not channel_allowed(cmd_name, channel_id):
                 return deny_wrong_channel(cmd_name, channel_id)
             member = payload.get("member", {}) or {}
@@ -756,18 +713,17 @@ async def discord_interaction(
                 action_taken, info = record_attendance_auto(name=name)
                 if action_taken is not None:
                     user_id = (user.get("id") or "").strip()
-                    fallback_channel_id = payload.get("channel_id")
                     broadcast_attendance(name=name, action=action_taken, user_id=user_id,
-                                         fallback_channel_id=fallback_channel_id)
+                                         fallback_channel_id=channel_id)
             except Exception as e:
                 return discord_response_message(f"❌ Failed to record attendance. {type(e).__name__}: {e}", True)
             return discord_response_message(f"{info}\n👤 **{name}** • 🕒 **{get_ist_timestamp()} IST**", True)
-                # ----- CONTENT REQUEST -----
+
+        # ----- CONTENT REQUEST -----
         if cmd_name == "contentrequest":
-            # options: topic (string), files (attachment)
-            channel_id = payload.get("channel_id", "")
             if not channel_allowed(cmd_name, channel_id):
                 return deny_wrong_channel(cmd_name, channel_id)
+
             topic = ""
             data_opts = data.get("options", []) or []
             for opt in data_opts:
@@ -782,9 +738,7 @@ async def discord_interaction(
             user = member.get("user", {}) or payload.get("user", {}) or {}
             requester = (user.get("global_name") or user.get("username") or "Unknown").strip()
 
-            bot_token = BOT_TOKEN.strip()
-            target_ch = CONTENT_REQUESTS_CHANNEL_ID.strip()
-            if not (bot_token and target_ch):
+            if not (BOT_TOKEN and CONTENT_REQUESTS_CHANNEL_ID):
                 return discord_response_message("❌ Server not configured for content requests.", True)
 
             content = (
@@ -801,8 +755,8 @@ async def discord_interaction(
                 ]
             }]
 
-            headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
-            url = f"https://discord.com/api/v10/channels/{target_ch}/messages"
+            headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+            url = f"https://discord.com/api/v10/channels/{CONTENT_REQUESTS_CHANNEL_ID}/messages"
             try:
                 r = requests.post(url, headers=headers, json={"content": content, "components": components}, timeout=15)
                 r.raise_for_status()
@@ -810,12 +764,12 @@ async def discord_interaction(
                 return discord_response_message(f"❌ Could not post to content-requests. {type(e).__name__}: {e}", True)
 
             return discord_response_message("✅ Sent to **#content-requests** for review.", True)
-                # ----- ASSET REVIEW -----
+
+        # ----- ASSET REVIEW -----
         if cmd_name == "assetreview":
-            # options: name (string), file (attachment)
-            channel_id = payload.get("channel_id", "")
             if not channel_allowed(cmd_name, channel_id):
                 return deny_wrong_channel(cmd_name, channel_id)
+
             asset_name = ""
             data_opts = data.get("options", []) or []
             for opt in data_opts:
@@ -830,9 +784,7 @@ async def discord_interaction(
             user = member.get("user", {}) or payload.get("user", {}) or {}
             requester = (user.get("global_name") or user.get("username") or "Unknown").strip()
 
-            bot_token = BOT_TOKEN.strip()
-            target_ch = ASSETS_REVIEWS_CHANNEL_ID.strip()
-            if not (bot_token and target_ch):
+            if not (BOT_TOKEN and ASSETS_REVIEWS_CHANNEL_ID):
                 return discord_response_message("❌ Server not configured for asset reviews.", True)
 
             content = (
@@ -849,8 +801,8 @@ async def discord_interaction(
                 ]
             }]
 
-            headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
-            url = f"https://discord.com/api/v10/channels/{target_ch}/messages"
+            headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+            url = f"https://discord.com/api/v10/channels/{ASSETS_REVIEWS_CHANNEL_ID}/messages"
             try:
                 r = requests.post(url, headers=headers, json={"content": content, "components": components}, timeout=15)
                 r.raise_for_status()
@@ -859,11 +811,8 @@ async def discord_interaction(
 
             return discord_response_message("✅ Sent to **#assets-reviews** for verification.", True)
 
-
-
         # ----- LEAVE COUNT -----
         if cmd_name == "leavecount":
-            channel_id = payload.get("channel_id", "")
             if not channel_allowed(cmd_name, channel_id):
                 return deny_wrong_channel(cmd_name, channel_id)
             options = data.get("options", []) or []
@@ -897,7 +846,6 @@ async def discord_interaction(
 
         # ----- LEAVE REQUEST -----
         if cmd_name == "leaverequest":
-            channel_id = payload.get("channel_id", "")
             if not channel_allowed(cmd_name, channel_id):
                 return deny_wrong_channel(cmd_name, channel_id)
             options = data.get("options", []) or []
@@ -923,10 +871,8 @@ async def discord_interaction(
                 )
             try:
                 append_leave_row(name=name, from_date=from_opt, to_date=to_opt, reason=reason_opt or "")
-                channel_id_from_payload = payload.get("channel_id")
-                # Reuse leave approver notify (buttons handled in t==3 below)
-                bot_token = BOT_TOKEN.strip()
-                if bot_token:
+                # Notify approver with buttons
+                if BOT_TOKEN:
                     content = (
                         f"📩 **Leave Request from {name}**\n"
                         f"🗓️ **From:** {from_opt}\n"
@@ -941,21 +887,21 @@ async def discord_interaction(
                             {"type": 2, "style": 4, "label": "Reject",  "custom_id": "leave_reject" }
                         ]
                     }]
-                    headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+                    headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
                     def post_to_channel(cid: str):
                         url = f"https://discord.com/api/v10/channels/{cid}/messages"
                         r = requests.post(url, headers=headers, json={"content": content, "components": components}, timeout=15)
                         r.raise_for_status()
-                    if APPROVER_CHANNEL_ID.strip():
-                        post_to_channel(APPROVER_CHANNEL_ID.strip())
-                    elif APPROVER_USER_ID.strip():
+                    if APPROVER_CHANNEL_ID:
+                        post_to_channel(APPROVER_CHANNEL_ID)
+                    elif APPROVER_USER_ID:
                         dm = requests.post("https://discord.com/api/v10/users/@me/channels",
-                                           headers=headers, json={"recipient_id": APPROVER_USER_ID.strip()}, timeout=15)
+                                           headers=headers, json={"recipient_id": APPROVER_USER_ID}, timeout=15)
                         dm.raise_for_status()
                         dm_ch = dm.json().get("id")
                         if dm_ch: post_to_channel(dm_ch)
-                    elif channel_id_from_payload:
-                        post_to_channel(channel_id_from_payload)
+                    else:
+                        post_to_channel(channel_id)
             except Exception as e:
                 return discord_response_message(f"❌ Failed to record leave. {type(e).__name__}: {e}", True)
 
@@ -963,11 +909,9 @@ async def discord_interaction(
                 f"✅ Leave request submitted by **{name}** from **{from_opt}** to **{to_opt}**.\nReason: {reason_opt or '(not provided)'}",
                 True
             )
-        
 
         # ----- WFH -----
         if cmd_name == "wfh":
-            channel_id = payload.get("channel_id", "")
             if not channel_allowed(cmd_name, channel_id):
                 return deny_wrong_channel(cmd_name, channel_id)
             options = data.get("options", []) or []
@@ -995,8 +939,7 @@ async def discord_interaction(
                 return discord_response_message(f"❌ Failed to record WFH request. {type(e).__name__}: {e}", True)
 
             # 2) notify approver channel/DM with Approve/Reject buttons
-            bot_token = BOT_TOKEN.strip()
-            if bot_token:
+            if BOT_TOKEN:
                 content = (
                     f"🏠 **WFH Request from {name}**\n"
                     f"📅 **Date:** {day}\n"
@@ -1010,25 +953,22 @@ async def discord_interaction(
                         {"type": 2, "style": 4, "label": "Reject",  "custom_id": "wfh_reject" }
                     ]
                 }]
-                headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+                headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
                 def post_to_channel(cid: str):
                     url = f"https://discord.com/api/v10/channels/{cid}/messages"
                     r = requests.post(url, headers=headers, json={"content": content, "components": components}, timeout=15)
-                    print(f"POST WFH notify -> {r.status_code} {r.text}")
                     r.raise_for_status()
                 try:
-                    if APPROVER_CHANNEL_ID.strip():
-                        post_to_channel(APPROVER_CHANNEL_ID.strip())
-                    elif APPROVER_USER_ID.strip():
+                    if APPROVER_CHANNEL_ID:
+                        post_to_channel(APPROVER_CHANNEL_ID)
+                    elif APPROVER_USER_ID:
                         dm = requests.post("https://discord.com/api/v10/users/@me/channels",
-                                           headers=headers, json={"recipient_id": APPROVER_USER_ID.strip()}, timeout=15)
-                        print(f"Create DM (WFH) -> {dm.status_code} {dm.text}")
+                                           headers=headers, json={"recipient_id": APPROVER_USER_ID}, timeout=15)
                         dm.raise_for_status()
                         dm_ch = dm.json().get("id")
                         if dm_ch: post_to_channel(dm_ch)
                     else:
-                        ch_id = payload.get("channel_id")
-                        if ch_id: post_to_channel(ch_id)
+                        post_to_channel(channel_id)
                 except Exception as e:
                     print(f"⚠️ Could not notify approver for WFH: {e}")
 
@@ -1039,7 +979,6 @@ async def discord_interaction(
 
         # ----- SCHEDULE MEET (optional) -----
         if cmd_name == "schedulemeet":
-            channel_id = payload.get("channel_id", "")
             if not channel_allowed(cmd_name, channel_id):
                 return deny_wrong_channel(cmd_name, channel_id)
             options = data.get("options", []) or []
@@ -1162,19 +1101,14 @@ async def discord_interaction(
                     }]
                 }
             })
+
         if custom_id == "leave_from_select":
             values = data.get("values") or []
             from_date = values[0] if values else None
             if not from_date:
                 return JSONResponse({"type": 4, "data": {"content": "❌ No start date selected.", "flags": 1 << 6}})
-
             from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
-            
-
-            # ≤ 25
             to_opts = _date_opts(from_dt, 25)
-            print(f"[leave_to_picker] from={from_date} options={len(to_opts)} first={to_opts[0] if to_opts else None}")
-
             return JSONResponse({
                 "type": 7,  # UPDATE_MESSAGE
                 "data": {
@@ -1192,16 +1126,12 @@ async def discord_interaction(
                 }
             })
 
-
         if custom_id.startswith("leave_to_select::"):
-            # Extract from date from custom_id
             _, from_date = custom_id.split("::", 1)
             values = data.get("values") or []
             to_date = values[0] if values else None
             if not to_date:
                 return JSONResponse({"type": 4, "data": {"content": "❌ No end date selected.", "flags": 1 << 6}})
-
-            # pop a modal to collect reason
             modal_custom_id = f"leave_reason::{from_date}::{to_date}"
             return JSONResponse({
                 "type": 9,  # MODAL
@@ -1225,7 +1155,6 @@ async def discord_interaction(
 
         # ---- WFH approve/reject buttons
         if custom_id in ("wfh_approve", "wfh_reject"):
-            # Parse from the WFH card
             name, date_str, wfh_reason = parse_wfh_card(content)
             if not (name and date_str):
                 return JSONResponse({"type": 4, "data": {"content": "❌ Could not parse WFH request.", "flags": 1 << 6}})
@@ -1272,7 +1201,8 @@ async def discord_interaction(
                         }]
                     }
                 })
-                # ---- Content request approve/reject
+
+        # ---- Content request approve/reject
         if custom_id in ("cr_approve", "cr_reject"):
             ch_id  = payload.get("channel_id", "")
             msg_id = message.get("id", "")
@@ -1324,14 +1254,13 @@ async def discord_interaction(
                 }
             })
 
-
         # Fallback for unknown buttons/selects
         return JSONResponse({
             "type": 4,
             "data": {"content": f"Unsupported action for button id `{custom_id}`.", "flags": 1 << 6}
         })
 
-    # 4) MODAL_SUBMIT (Leave reject & WFH reject)
+    # 4) MODAL_SUBMIT (Leave/Content/Asset/WFH reject flows)
     if t == 5:
         data = payload.get("data", {}) or {}
         modal_custom_id = data.get("custom_id", "")
@@ -1350,13 +1279,11 @@ async def discord_interaction(
 
         # Leave rejection modal
         if modal_custom_id.startswith("reject_reason::"):
-            # Parse ch/msg ids
             _, ch_id, msg_id = (modal_custom_id.split("::") + ["", "", ""])[:3]
             ch_id = ch_id or payload.get("channel_id", "")
-            bot_token = BOT_TOKEN.strip()
-            if not (bot_token and ch_id and msg_id):
+            if not (BOT_TOKEN and ch_id and msg_id):
                 return JSONResponse({"type": 4, "data": {"content": "❌ Missing context to complete rejection.", "flags": 1 << 6}})
-            headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+            headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
 
             # Load original message
             get_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
@@ -1415,16 +1342,16 @@ async def discord_interaction(
                 fallback_channel_id=ch_id
             )
             return JSONResponse({"type": 4, "data": {"content": "✅ Rejection recorded.", "flags": 1 << 6}})
-                # ---- Content request modal submit
+
+        # ---- Content request modal submit (Approve/Reject) ----
         if modal_custom_id.startswith(("cr_approve_reason::", "cr_reject_reason::")):
             _, ch_id, msg_id = (modal_custom_id.split("::") + ["", "", ""])[:3]
-            comment = reject_note  # already parsed above as `reject_note` (we reuse it here as generic comment)
-            bot_token = BOT_TOKEN.strip()
-            if not (bot_token and ch_id and msg_id):
+            comment = reject_note
+            if not (BOT_TOKEN and ch_id and msg_id):
                 return JSONResponse({"type": 4, "data": {"content": "❌ Missing context.", "flags": 1 << 6}})
-            headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+            headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
 
-            # Load the original message to keep content & disable buttons
+            # Load the original card to keep content & disable buttons
             get_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
             r = requests.get(get_url, headers=headers, timeout=15)
             if r.status_code != 200:
@@ -1433,10 +1360,6 @@ async def discord_interaction(
             content = msg.get("content", "") or ""
 
             decision = "Approved" if modal_custom_id.startswith("cr_approve_reason::") else "Rejected"
-            # reviewer name
-            member = payload.get("member", {}) or {}
-            user = member.get("user", {}) or payload.get("user", {}) or {}
-            reviewer = (user.get("global_name") or user.get("username") or "Unknown").strip()
 
             new_content = (
                 content
@@ -1455,20 +1378,37 @@ async def discord_interaction(
             pr = requests.patch(patch_url, headers=headers, json={"content": new_content, "components": disabled_components}, timeout=15)
             if pr.status_code not in (200, 201):
                 print(f"❌ Failed to edit message: {pr.status_code} {pr.text}")
+
+            # Log to Sheets
             append_content_decision_row_from_card(content, decision, reviewer, comment)
-            if CONTENT_TEAM_CHANNEL_ID.strip():
-                team_msg = content_decision_message_for_team(content, decision, reviewer, comment)
-                _post_to_channel(CONTENT_TEAM_CHANNEL_ID.strip(), team_msg)
+
+            # Also notify content-team
+            if CONTENT_TEAM_CHANNEL_ID:
+                team_msg = (
+                    "📣 **Content Request Decision**\n"
+                    f"🧑‍💼 **Reviewer:** {reviewer}\n"
+                    f"✅❌ **Decision:** {decision}"
+                    + (f"\n📝 **Comments:** {comment}" if comment else "")
+                )
+                # Include parsed request details
+                req, topic, filename, file_url = parse_content_request_card(content)
+                team_msg = (
+                    f"{team_msg}\n"
+                    f"👤 **Requester:** {req}\n"
+                    f"📌 **Topic:** {topic}\n"
+                    f"📎 **File:** [{filename}]({file_url})"
+                )
+                _post_to_channel(CONTENT_TEAM_CHANNEL_ID, team_msg)
+
             return JSONResponse({"type": 4, "data": {"content": "✅ Decision recorded.", "flags": 1 << 6}})
 
-        # ---- Asset review modal submit
+        # ---- Asset review modal submit (Approve/Reject) ----
         if modal_custom_id.startswith(("ar_approve_reason::", "ar_reject_reason::")):
             _, ch_id, msg_id = (modal_custom_id.split("::") + ["", "", ""])[:3]
             comment = reject_note
-            bot_token = BOT_TOKEN.strip()
-            if not (bot_token and ch_id and msg_id):
+            if not (BOT_TOKEN and ch_id and msg_id):
                 return JSONResponse({"type": 4, "data": {"content": "❌ Missing context.", "flags": 1 << 6}})
-            headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+            headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
 
             get_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
             r = requests.get(get_url, headers=headers, timeout=15)
@@ -1478,9 +1418,6 @@ async def discord_interaction(
             content = msg.get("content", "") or ""
 
             decision = "Approved" if modal_custom_id.startswith("ar_approve_reason::") else "Rejected"
-            member = payload.get("member", {}) or {}
-            user = member.get("user", {}) or payload.get("user", {}) or {}
-            reviewer = (user.get("global_name") or user.get("username") or "Unknown").strip()
 
             new_content = (
                 content
@@ -1499,25 +1436,33 @@ async def discord_interaction(
             pr = requests.patch(patch_url, headers=headers, json={"content": new_content, "components": disabled_components}, timeout=15)
             if pr.status_code not in (200, 201):
                 print(f"❌ Failed to edit message: {pr.status_code} {pr.text}")
+
+            # Log to Sheets
             append_asset_decision_row_from_card(content, decision, reviewer, comment)
 
-            if CONTENT_TEAM_CHANNEL_ID.strip():
-                team_msg = asset_decision_message_for_team(content, decision, reviewer, comment)
-                _post_to_channel(CONTENT_TEAM_CHANNEL_ID.strip(), team_msg)
+            # Also notify content-team
+            if CONTENT_TEAM_CHANNEL_ID:
+                req, asset_name, filename, file_url = parse_asset_review_card(content)
+                team_msg = (
+                    "📣 **Asset Review Decision**\n"
+                    f"🧑‍💼 **Reviewer:** {reviewer}\n"
+                    f"✅❌ **Decision:** {decision}"
+                    + (f"\n📝 **Comments:** {comment}" if comment else "")
+                    + f"\n👤 **Requester:** {req}"
+                    + f"\n🏷️ **Asset:** {asset_name}"
+                    + f"\n📎 **File:** [{filename}]({file_url})"
+                )
+                _post_to_channel(CONTENT_TEAM_CHANNEL_ID, team_msg)
 
-
-            
             return JSONResponse({"type": 4, "data": {"content": "✅ Decision recorded.", "flags": 1 << 6}})
-
 
         # WFH rejection modal
         if modal_custom_id.startswith("wfh_reject_reason::"):
             _, ch_id, msg_id = (modal_custom_id.split("::") + ["", "", ""])[:3]
             ch_id = ch_id or payload.get("channel_id", "")
-            bot_token = BOT_TOKEN.strip()
-            if not (bot_token and ch_id and msg_id):
+            if not (BOT_TOKEN and ch_id and msg_id):
                 return JSONResponse({"type": 4, "data": {"content": "❌ Missing context to complete WFH rejection.", "flags": 1 << 6}})
-            headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+            headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
 
             # Load original message to parse details
             get_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
@@ -1559,8 +1504,9 @@ async def discord_interaction(
                 decision=decision, reviewer=reviewer, fallback_channel_id=ch_id
             )
             return JSONResponse({"type": 4, "data": {"content": "✅ WFH rejection recorded.", "flags": 1 << 6}})
+
+        # Leave modal (reason after selecting To)
         if modal_custom_id.startswith("leave_reason::"):
-            # Parse dates from modal id
             _, from_date, to_date = (modal_custom_id.split("::") + ["", "", ""])[:3]
             comps = data.get("components", []) or []
             reason_text = ""
@@ -1569,17 +1515,13 @@ async def discord_interaction(
             except Exception:
                 pass
 
-            # Invoker name
             member = payload.get("member", {}) or {}
             user = member.get("user", {}) or payload.get("user", {}) or {}
             name = (user.get("global_name") or user.get("username") or "Unknown").strip()
 
-            # Write + notify
             try:
                 append_leave_row(name=name, from_date=from_date, to_date=to_date, reason=reason_text or "")
-                # Notify approver with buttons (same pattern you already use)
-                bot_token = BOT_TOKEN.strip()
-                if bot_token:
+                if BOT_TOKEN:
                     content = (
                         f"📩 **Leave Request from {name}**\n"
                         f"🗓️ **From:** {from_date}\n"
@@ -1594,16 +1536,16 @@ async def discord_interaction(
                             {"type": 2, "style": 4, "label": "Reject",  "custom_id": "leave_reject"}
                         ]
                     }]
-                    headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+                    headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
                     def post_to_channel(cid: str):
                         url = f"https://discord.com/api/v10/channels/{cid}/messages"
                         r = requests.post(url, headers=headers, json={"content": content, "components": components}, timeout=15)
                         r.raise_for_status()
-                    if APPROVER_CHANNEL_ID.strip():
-                        post_to_channel(APPROVER_CHANNEL_ID.strip())
-                    elif APPROVER_USER_ID.strip():
+                    if APPROVER_CHANNEL_ID:
+                        post_to_channel(APPROVER_CHANNEL_ID)
+                    elif APPROVER_USER_ID:
                         dm = requests.post("https://discord.com/api/v10/users/@me/channels",
-                                        headers=headers, json={"recipient_id": APPROVER_USER_ID.strip()}, timeout=15)
+                                           headers=headers, json={"recipient_id": APPROVER_USER_ID}, timeout=15)
                         dm.raise_for_status()
                         dm_ch = dm.json().get("id")
                         if dm_ch: post_to_channel(dm_ch)
@@ -1614,7 +1556,6 @@ async def discord_interaction(
                 return JSONResponse({"type": 4, "data": {"content": f"❌ Failed to record leave. {type(e).__name__}: {e}", "flags": 1 << 6}})
 
             return JSONResponse({"type": 4, "data": {"content": f"✅ Leave requested for **{from_date} → {to_date}**.", "flags": 1 << 6}})
-
 
     # Fallback
     return discord_response_message("Unsupported interaction type.", True)
