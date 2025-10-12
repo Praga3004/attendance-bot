@@ -34,6 +34,36 @@ HR_ROLE_ID              = os.environ.get("HR_ROLE_ID", "")
 ATTENDANCE_CHANNEL_ID   = os.environ.get("ATTENDANCE_CHANNEL_ID", "")
 CONTENT_REQUESTS_CHANNEL_ID = os.environ.get("CONTENT_REQUESTS_CHANNEL_ID", "")
 ASSETS_REVIEWS_CHANNEL_ID   = os.environ.get("ASSETS_REVIEWS_CHANNEL_ID", "")
+LEAVE_REQUESTS_CHANNEL_ID = os.environ.get("LEAVE_REQUESTS_CHANNEL_ID","").strip()
+CONTENT_TEAM_CHANNEL_ID   = os.environ.get("CONTENT_TEAM_CHANNEL_ID","").strip()
+
+CMD_ALLOWED_CHANNELS = {
+    "leaverequests": {LEAVE_REQUESTS_CHANNEL_ID},
+    "wfh":           {LEAVE_REQUESTS_CHANNEL_ID},
+    "leavecount":    {LEAVE_REQUESTS_CHANNEL_ID},
+    "attendance":    {ATTENDANCE_CHANNEL_ID},
+    "contentreview": {CONTENT_TEAM_CHANNEL_ID},
+    "assetreview":   {CONTENT_TEAM_CHANNEL_ID},
+}
+
+CHANNEL_LABELS = {
+    LEAVE_REQUESTS_CHANNEL_ID: "#leave-requests",
+    ATTENDANCE_CHANNEL_ID: "#attendance",
+    CONTENT_TEAM_CHANNEL_ID: "#content-team",
+}
+
+
+def channel_allowed(cmd: str, cid: str) -> bool:
+    allowed = CMD_ALLOWED_CHANNELS.get(cmd.lower(), set())
+    return bool(cid) and cid in allowed
+
+def deny_wrong_channel(cmd: str, cid: str):
+    allowed = CMD_ALLOWED_CHANNELS.get(cmd.lower(), set())
+    # Build a friendly hint listing where it IS allowed
+    where = " or ".join(CHANNEL_LABELS.get(c, f"<#{c}>") for c in allowed if c)
+    msg = f"⛔ **{cmd}** isn’t allowed here. Use it in {where}."
+    return discord_response_message(msg, True)
+
 
 def _post_to_channel(cid: str, content: str):
     bot_token = BOT_TOKEN.strip()
@@ -674,6 +704,9 @@ async def discord_interaction(
         # --- /leaverequest from/to autocomplete (NEW) ---
         if cmd_name == "leaverequest" and focused:
             # figure out which field is focused
+            channel_id = payload.get("channel_id", "")
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
             fname = focused.get("name")
             # helper to convert option list to dict {name: value}
             opts_map = {o.get("name"): (o.get("value") or "") for o in (data.get("options") or [])}
@@ -713,6 +746,9 @@ async def discord_interaction(
 
         # ----- ATTENDANCE (NO ARGUMENTS) -----
         if cmd_name == "attendance":
+            channel_id = payload.get("channel_id", "")
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
             member = payload.get("member", {}) or {}
             user = member.get("user", {}) or payload.get("user", {}) or {}
             name = (user.get("global_name") or user.get("username") or "Unknown").strip()
@@ -729,6 +765,9 @@ async def discord_interaction(
                 # ----- CONTENT REQUEST -----
         if cmd_name == "contentrequest":
             # options: topic (string), files (attachment)
+            channel_id = payload.get("channel_id", "")
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
             topic = ""
             data_opts = data.get("options", []) or []
             for opt in data_opts:
@@ -774,6 +813,9 @@ async def discord_interaction(
                 # ----- ASSET REVIEW -----
         if cmd_name == "assetreview":
             # options: name (string), file (attachment)
+            channel_id = payload.get("channel_id", "")
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
             asset_name = ""
             data_opts = data.get("options", []) or []
             for opt in data_opts:
@@ -821,6 +863,9 @@ async def discord_interaction(
 
         # ----- LEAVE COUNT -----
         if cmd_name == "leavecount":
+            channel_id = payload.get("channel_id", "")
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
             options = data.get("options", []) or []
             explicit_name = None
             for opt in options:
@@ -852,6 +897,9 @@ async def discord_interaction(
 
         # ----- LEAVE REQUEST -----
         if cmd_name == "leaverequest":
+            channel_id = payload.get("channel_id", "")
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
             options = data.get("options", []) or []
             from_opt = to_opt = reason_opt = None
             for opt in options:
@@ -919,6 +967,9 @@ async def discord_interaction(
 
         # ----- WFH -----
         if cmd_name == "wfh":
+            channel_id = payload.get("channel_id", "")
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
             options = data.get("options", []) or []
             day = reason = None
             for opt in options:
@@ -988,6 +1039,9 @@ async def discord_interaction(
 
         # ----- SCHEDULE MEET (optional) -----
         if cmd_name == "schedulemeet":
+            channel_id = payload.get("channel_id", "")
+            if not channel_allowed(cmd_name, channel_id):
+                return deny_wrong_channel(cmd_name, channel_id)
             options = data.get("options", []) or []
             title = start_str = end_str = None
             for opt in options:
