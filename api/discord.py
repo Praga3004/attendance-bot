@@ -224,6 +224,7 @@ def get_today_status(name: str, user_id: str) -> Tuple[bool, bool]:
             print("r,uname,user_id")
             continue
         d = _ts_cell_to_date_ist(r[0])
+        print(r[0])
         if d != tday:
             print(f"d!=tday {d} {tday}")
             continue
