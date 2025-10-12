@@ -1399,7 +1399,7 @@ async def discord_interaction(
             pr = requests.patch(patch_url, headers=headers, json={"content": new_content, "components": disabled_components}, timeout=15)
             if pr.status_code not in (200, 201):
                 print(f"❌ Failed to edit message: {pr.status_code} {pr.text}")
-            append_asset_decision_row_from_card(content, decision, reviewer, comment)
+            
             return JSONResponse({"type": 4, "data": {"content": "✅ Decision recorded.", "flags": 1 << 6}})
 
 
