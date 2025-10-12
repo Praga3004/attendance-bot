@@ -238,13 +238,13 @@ def _get_attachment_from_options(interaction_payload: dict, option_name: str):
         a.get("size"),
     )
 def append_leave_decision_row(name: str, from_date: str, to_date: str, reason: str,
-                              decision: str, reviewer: str) -> None:
+                              decision: str, reviewer: str, days: int) -> None:
     service = get_service()
-    values = [[get_ist_timestamp(), name, from_date, to_date, reason, decision, reviewer]]
+    values = [[get_ist_timestamp(), name, from_date, to_date, reason, decision, reviewer, days]]
     body = {"values": values}
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
-        range="'Leave Decisions'!A:G",
+        range="'Leave Decisions'!A:H",  # now 8 columns
         valueInputOption="USER_ENTERED",
         insertDataOption="INSERT_ROWS",
         body=body,
@@ -619,6 +619,55 @@ def _parse_ymd(s: str) -> date | None:
         return datetime.strptime(s.strip(), "%Y-%m-%d").date()
     except Exception:
         return None
+def list_invoices_for_autocomplete(query: str = "") -> List[tuple[str, str, float, float, float]]:
+    """
+    Returns up to 25 (inv_no, company, total, cleared, outstanding) filtered by `query`.
+    """
+    inv = fetch_invoices()
+    cl  = fetch_invoice_clears()
+
+    # detect headers
+    inv_start = 1 if inv and (len(inv[0])>=4 and isinstance(inv[0][3], str)) else 0
+    cl_start  = 1 if cl  and (len(cl[0]) >=3 and isinstance(cl[0][2], str)) else 0
+
+    totals, companies = {}, {}
+    for r in inv[inv_start:]:
+        if len(r) < 4: 
+            continue
+        ts = r[0]
+        company = str(r[1]).strip()
+        inv_no  = str(r[2]).strip()
+        val     = _to_number(r[3])
+        if not inv_no:
+            continue
+        totals[inv_no] = totals.get(inv_no, 0.0) + val
+        if inv_no not in companies:
+            companies[inv_no] = company
+
+    cleared = {}
+    for r in cl[cl_start:]:
+        if len(r) < 3: 
+            continue
+        inv_no = str(r[1]).strip()
+        val    = _to_number(r[2])
+        if not inv_no:
+            continue
+        cleared[inv_no] = cleared.get(inv_no, 0.0) + val
+
+    # build rows
+    q = (query or "").lower()
+    rows = []
+    for inv_no, total in totals.items():
+        comp = companies.get(inv_no, "")
+        clr  = cleared.get(inv_no, 0.0)
+        out  = max(total - clr, 0.0)
+        if q and q not in inv_no.lower() and q not in comp.lower():
+            continue
+        rows.append((inv_no, comp, total, clr, out))
+
+    # sort by most outstanding first, then invoice no
+    rows.sort(key=lambda x: (-x[4], x[0]))
+    return rows[:25]
 
 def _overlap_days(d1s: date, d1e: date, d2s: date, d2e: date) -> int:
     lo, hi = max(d1s, d2s), min(d1e, d2e)
@@ -837,7 +886,7 @@ async def discord_interaction(
                 label = f"{d.isoformat()} ({d.strftime('%a')})"
                 choices.append({"name": label, "value": d.isoformat()})
             return JSONResponse({"type": 8, "data": {"choices": choices}})
-
+        
         # --- /leaverequest from/to autocomplete ---
         if cmd_name == "leaverequest" and focused:
             channel_id = payload.get("channel_id", "")
@@ -1125,37 +1174,91 @@ async def discord_interaction(
             return discord_response_message("✅ Sent to **#assets-reviews** for verification.", True)
 
         # ----- LEAVE COUNT -----
+        # ----- LEAVE COUNT -----
         if cmd_name == "leavecount":
             if not channel_allowed(cmd_name, channel_id):
                 return deny_wrong_channel(cmd_name, channel_id)
+
             options = data.get("options", []) or []
             explicit_name = None
             for opt in options:
                 if opt.get("name") == "name":
                     explicit_name = (opt.get("value") or "").strip()
+
             member = payload.get("member", {}) or {}
             user = member.get("user", {}) or payload.get("user", {}) or {}
             fallback_name = user.get("global_name") or user.get("username") or "Unknown"
             target_name = (explicit_name or fallback_name).strip()
+
             try:
-                req_count, total_days, details = count_user_leaves_current_month(target_name)
+                rows = fetch_leave_decisions_rows()  # A:H with Days now at index 7
             except Exception as e:
                 return discord_response_message(f"❌ Could not read leave data. {type(e).__name__}: {e}", True)
+
+            # header detection (optional)
+            start_idx = 0
+            if rows and rows[0]:
+                hdr = [str(c).lower() for c in rows[0]]
+                # crude check: first row looks like a header if it contains typical labels
+                if ("name" in (hdr[1] if len(hdr) > 1 else "")) or ("decision" in (hdr[5] if len(hdr) > 5 else "")):
+                    start_idx = 1
+
+            # Month window (we still use dates only to decide inclusion; days value is used for the total)
+            month_start, month_end = _month_bounds_ist()
             month_label = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%B %Y")
-            if req_count == 0:
+
+            items = []   # (from_date, to_date, days)
+            total_days = 0
+
+            for r in rows[start_idx:]:
+                # expect: [ts, name, from, to, reason, decision, reviewer, days]
+                if len(r) < 8:
+                    continue
+                nm        = (r[1] or "").strip()
+                dec       = (r[5] or "").strip().lower()
+                from_str  = (r[2] or "").strip()
+                to_str    = (r[3] or "").strip()
+                days_val  = _to_int(r[7], 0)
+
+                if not nm or dec != "approved":
+                    continue
+                if nm.lower() != target_name.lower():
+                    continue
+
+                # include entry in this month if it overlaps the month window (no partial math applied)
+                d_from = _parse_ymd(from_str)
+                d_to   = _parse_ymd(to_str)
+                if not d_from or not d_to:
+                    continue
+                if d_from > d_to:
+                    d_from, d_to = d_to, d_from
+
+                overlaps = not (d_to < month_start or d_from > month_end)
+                if not overlaps:
+                    continue
+
+                items.append((d_from, d_to, days_val))
+                total_days += max(days_val, 0)
+
+            if not items:
                 return discord_response_message(
-                    f"📊 **{target_name}** has **0** approved leave requests in **{month_label}**.", True
+                    f"📊 **Approved leaves in {month_label}** for **{target_name}**\n(No entries)\n**Total days:** 0",
+                    True
                 )
-            lines = [f"{i}. {df.isoformat()} → {dt.isoformat()} ({od} day{'s' if od!=1 else ''})"
-                     for i, (df, dt, od) in enumerate(details[:5], 1)]
-            extra = f"\n…and {len(details) - 5} more request(s)." if len(details) > 5 else ""
+
+            # render simple table-like list
+            lines = [
+                f"{i}. {df.isoformat()} → {dt.isoformat()} — {d} day{'s' if d != 1 else ''}"
+                for i, (df, dt, d) in enumerate(items, 1)
+            ]
+
             msg = (
-                f"📊 **{target_name}** in **{month_label}**\n"
-                f"• Approved requests overlapping this month: **{req_count}**\n"
-                f"• Total approved days this month: **{total_days}**\n\n"
-                + "\n".join(lines) + extra
+                f"📊 **Approved leaves in {month_label}** for **{target_name}**\n"
+                + "\n".join(lines) +
+                f"\n\n**Total days:** {total_days}"
             )
             return discord_response_message(msg, True)
+
 
         # ----- LEAVE REQUEST -----
         if cmd_name == "leaverequest":
@@ -1374,13 +1477,15 @@ async def discord_interaction(
         from_str = grab_between("**From:** ", content)
         to_str   = grab_between("**To:** ", content)
         reason   = grab_between("**Reason:** ", content)
+        days_str = grab_between("**Days:** ", content) or "0"
+        days_val = _to_int(days_str, 0)
 
         if custom_id == "leave_approve":
             if not (req_name and from_str and to_str):
                 return JSONResponse({"type": 4, "data": {"content": "❌ Could not parse the request details.", "flags": 1 << 6}})
             decision = "Approved"
             try:
-                append_leave_decision_row(req_name, from_str, to_str, reason, decision, reviewer)
+                append_leave_decision_row(req_name, from_str, to_str, reason, decision, reviewer, days_val)
             except Exception as e:
                 return JSONResponse({"type": 4, "data": {"content": f"❌ Failed to record decision. {type(e).__name__}: {e}", "flags": 1 << 6}})
             new_content = content + f"\n\n**Status:** {decision} by **{reviewer}** at **{get_ist_timestamp()} IST**"
@@ -1658,10 +1763,12 @@ async def discord_interaction(
             from_str = grab_between("**From:** ", content)
             to_str   = grab_between("**To:** ", content)
             req_reason = grab_between("**Reason:** ", content)
+            days_str = grab_between("**Days:** ", content) or "0"
+            days_val = _to_int(days_str, 0)
 
             decision = "Rejected"
             try:
-                append_leave_decision_row(req_name, from_str, to_str, req_reason, decision, reviewer)
+                append_leave_decision_row(req_name, from_str, to_str, req_reason, decision, reviewer, days_val)
             except Exception as e:
                 return JSONResponse({"type": 4, "data": {"content": f"❌ Failed to record decision. {type(e).__name__}: {e}", "flags": 1 << 6}})
 
