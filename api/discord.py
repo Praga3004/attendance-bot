@@ -419,7 +419,7 @@ def append_leave_row(name: str, from_date: str, days: int, to_date: str, reason:
     body = {"values": values}
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
-        range="'Leave Requests'!A:E",
+        range="'Leave Requests'!A:F",
         valueInputOption="USER_ENTERED",
         insertDataOption="INSERT_ROWS",
         body=body,
