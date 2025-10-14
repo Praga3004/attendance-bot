@@ -1506,7 +1506,7 @@ async def discord_interaction(
                 return discord_response_message("❌ Please provide a valid **days** (integer ≥ 1).", True)
         
             try:
-                append_leave_row(name=name, from_date=from_opt, days=days,to_date=to_opt, reason=reason_opt or "")
+                append_leave_row(name=name, from_date=from_opt, days=days_opt,to_date=to_opt, reason=reason_opt or "")
                 # Notify approver with buttons
                 if BOT_TOKEN:
                     content = (
