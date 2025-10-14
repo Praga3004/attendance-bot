@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 import os, json, time, requests, re
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
+from datetime import datetime
 from typing import Any, Tuple, List
 
 # Discord signature verification
@@ -28,6 +29,8 @@ DISCORD_PUBLIC_KEY           = (os.environ.get("DISCORD_PUBLIC_KEY", "") or "").
 SHEET_ID                     = (os.environ.get("SHEET_ID", "") or "").strip()
 SERVICE_ACCOUNT_JSON         = (os.environ.get("SERVICE_ACCOUNT_JSON", "") or "").strip()
 BOT_TOKEN                    = (os.environ.get("BOT_TOKEN", "") or "").strip()
+ADMIN_SUBJECT               = (os.environ.get("ADMIN_SUBJECT", "") or "").strip()  # Workspace admin email for domain-wide delegation
+
 
 # Channels / roles
 
@@ -310,6 +313,133 @@ def get_service():
         ],
     )
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
+def get_reports_service():
+    """
+    Admin SDK Reports API service with domain-wide delegation.
+    Requires:
+      - SERVICE_ACCOUNT_JSON to be a Workspace service account with domain-wide delegation enabled
+      - ADMIN_SUBJECT to be a super admin (or admin with Reports access)
+    Scopes: admin.reports.audit.readonly
+    """
+    if not SERVICE_ACCOUNT_JSON:
+        raise RuntimeError("SERVICE_ACCOUNT_JSON env var missing")
+    if not ADMIN_SUBJECT:
+        raise RuntimeError("ADMIN_SUBJECT env var missing (Workspace admin email required)")
+    sa_info = json.loads(SERVICE_ACCOUNT_JSON)
+    creds = service_account.Credentials.from_service_account_info(
+        sa_info,
+        scopes=["https://www.googleapis.com/auth/admin.reports.audit.readonly"],
+    ).with_subject(ADMIN_SUBJECT)
+    return build("admin", "reports_v1", credentials=creds, cache_discovery=False)
+
+
+_MEET_CODE_RE = re.compile(r"(?:https?://)?meet\.google\.com/([a-z]{3}-[a-z]{4}-[a-z]{3})(?:\?.*)?$", re.I)
+
+def extract_meet_code(meet_link_or_code: str) -> str:
+    """
+    Accepts full meet link (https://meet.google.com/abc-defg-hij) or just the code.
+    Returns normalized code (abc-defg-hij) or "" if not found.
+    """
+    s = (meet_link_or_code or "").strip()
+    m = _MEET_CODE_RE.match(s)
+    if m:
+        return m.group(1).lower()
+    # maybe user already passed a bare code
+    if re.fullmatch(r"[a-z]{3}-[a-z]{4}-[a-z]{3}", s, re.I):
+        return s.lower()
+    return ""
+
+
+def fetch_meet_attendance_emails(meet_code: str, hours_back: int = 72) -> list[str]:
+    """
+    Uses Admin Reports API (Google Meet logs) to collect participant emails for a meeting code.
+    - Tries server-side filtering by meeting_code; if unsupported, falls back to time-window fetch + client filter.
+    Returns a sorted list of unique emails.
+    """
+    svc = get_reports_service()
+    # Time window: last N hours, RFC3339
+    end_dt = datetime.utcnow()
+    start_dt = end_dt - timedelta(hours=max(1, hours_back))
+    start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    emails = set()
+
+    # First: try filters for meeting_code (supported on many tenants)
+    try:
+        req = svc.activities().list(
+            userKey="all",
+            applicationName="meet",
+            startTime=start_iso,
+            # We’ll request everything and filter by eventName/parameters
+            maxResults=1000,
+            # Some deployments accept this filter; harmless if ignored
+            filters=f"meeting_code=={meet_code}"
+        )
+        while True:
+            resp = req.execute()
+            for act in (resp.get("items") or []):
+                if (act.get("id", {}).get("applicationName") or "").lower() != "meet":
+                    continue
+                # Extract participant emails from parameters
+                for ev in (act.get("events") or []):
+                    for p in (ev.get("parameters") or []):
+                        # Common parameter keys: participant_email, organizer_email, display_name, meeting_code, meeting_id, etc.
+                        if (p.get("name") or "").lower() == "participant_email":
+                            if p.get("value"):
+                                emails.add(p["value"].lower())
+                        if (p.get("name") or "").lower() == "organizer_email":
+                            if p.get("value"):
+                                emails.add(p["value"].lower())
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+            req = svc.activities().list(
+                userKey="all",
+                applicationName="meet",
+                startTime=start_iso,
+                maxResults=1000,
+                filters=f"meeting_code=={meet_code}",
+                pageToken=page_token
+            )
+    except Exception:
+        # Fallback: fetch by time range and filter by meeting_code manually
+        req = svc.activities().list(
+            userKey="all",
+            applicationName="meet",
+            startTime=start_iso,
+            maxResults=1000,
+        )
+        while True:
+            resp = req.execute()
+            for act in (resp.get("items") or []):
+                if (act.get("id", {}).get("applicationName") or "").lower() != "meet":
+                    continue
+                # Check the parameters contain our meeting_code
+                has_code = False
+                params_flat = []
+                for ev in (act.get("events") or []):
+                    for p in (ev.get("parameters") or []):
+                        params_flat.append(p)
+                        if (p.get("name") or "").lower() == "meeting_code" and (p.get("value") or "").lower() == meet_code:
+                            has_code = True
+                if not has_code:
+                    continue
+                for p in params_flat:
+                    if (p.get("name") or "").lower() in ("participant_email", "organizer_email"):
+                        if p.get("value"):
+                            emails.add(p["value"].lower())
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+            req = svc.activities().list(
+                userKey="all",
+                applicationName="meet",
+                startTime=start_iso,
+                maxResults=1000,
+                pageToken=page_token
+            )
+
+    return sorted(emails)
 
 def discord_response_message(content: str, ephemeral: bool = True) -> JSONResponse:
     data = {"content": content}
@@ -328,6 +458,34 @@ def _sheets_serial_to_dt_ist(value: Any) -> datetime | None:
         return None
     dt = _SHEETS_EPOCH + timedelta(days=days)
     return dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+# Add this helper next to your other helpers
+def _cell_is_today_ist(ts_val: Any) -> bool:
+    """
+    True if the timestamp cell (numeric serial or string) is the same Y-M-D
+    as 'today' in IST. String path: split by '-' and use first 3 parts.
+    """
+    tday = today_ist_date()
+
+    # Numeric (Google Sheets serial) -> convert via existing helper
+    dt = _sheets_serial_to_dt_ist(ts_val)
+    if dt is not None:
+        return dt.date() == tday
+
+    # String case: expect "YYYY-MM-DD..." (we only care about Y-M-D)
+    s = ("" if ts_val is None else str(ts_val)).strip()
+    if not s:
+        return False
+
+    # Take first token before any whitespace, then split on '-'
+    first = s.split()[0]
+    parts = first.split("-")
+    if len(parts) >= 3 and all(p.isdigit() for p in parts[:3]):
+        try:
+            y, m, d = map(int, parts[:3])
+            return date(y, m, d) == tday
+        except Exception:
+            return False
+    return False
 
 def _ts_cell_to_date_ist(ts_val: Any) -> date | None:
     # 1) Try numeric serial first
@@ -386,33 +544,31 @@ def _row_matches_user(row: List[str], target_name: str, target_user_id: str) -> 
     return (nm or "").strip().lower() == (target_name or "").strip().lower()
 
 def get_today_status(name: str, user_id: str) -> Tuple[bool, bool]:
-    """Returns (has_login_today, has_logout_today) for this user."""
+    """Returns (has_login_today, has_logout_today) for this user, comparing Y-M-D in IST."""
     rows = fetch_attendance_rows()
-    tday = today_ist_date()
     has_login = has_logout = False
+
     for r in rows:
         if len(r) < 3:
-            print("r<3")
             continue
         if not _row_matches_user(r, name, user_id):
-            print("r,uname,user_id")
             continue
-        d = _ts_cell_to_date_ist(r[0])
-        print(r[0])
-        if d != tday:
-            print(f"d!=tday {d} {tday}")
+
+        # r[0] = timestamp; match by Y-M-D using the robust helper above
+        if not _cell_is_today_ist(r[0]):
             continue
+
         a = (r[2] or "").strip().lower()
         if a == "login":
-            print("login")
             has_login = True
         elif a == "logout":
-            print("logout")
             has_logout = True
+
         if has_login and has_logout:
-            print("Both")
             break
+
     return has_login, has_logout
+
 def append_leave_row(name: str, from_date: str, days: int, to_date: str, reason: str) -> None:
     service = get_service()
     values = [[get_ist_timestamp(), name, from_date, days, to_date, reason]]
@@ -429,7 +585,9 @@ def append_attendance_row(name: str, action: str, user_id: str, progress: str | 
     Writes: [=NOW(), name, action, user_id, progress]
     """
     service = get_service()
-    values = [["=NOW()", name, action, user_id or "", (progress or "").strip()]]
+    timeVal=datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d-%H:%M:%S")
+    
+    values = [[timeVal, name, action, user_id or "", (progress or "").strip()]]
     body = {"values": values}
     
     service.spreadsheets().values().append(
@@ -1448,6 +1606,43 @@ async def discord_interaction(
             return discord_response_message(
                 f"✅ **Google Meet Scheduled!**\n📅 **{title}**\n🕒 {start_str} → {end_str}\n🔗 {meet_link}",
                 False
+            )
+        if cmd_name == "auditmeet":
+            if not channel_allowed("leaverequest", channel_id) and not channel_allowed("wfh", channel_id):
+                # Reuse your leave-requests channel guard; or make a new one if you prefer.
+                # Alternatively, remove this check to allow anywhere.
+                pass
+
+            opts = data.get("options", []) or []
+            meetlink = ""
+            hours = 72
+            for opt in opts:
+                n = (opt.get("name") or "").lower()
+                if n == "meetlink":
+                    meetlink = (opt.get("value") or "").strip()
+                elif n == "hours":
+                    try:
+                        hours = max(1, int(opt.get("value")))
+                    except Exception:
+                        hours = 72
+
+            code = extract_meet_code(meetlink)
+            if not code:
+                return discord_response_message("❌ Please provide a valid Google Meet link or code (e.g., https://meet.google.com/abc-defg-hij).", True)
+
+            try:
+                emails = fetch_meet_attendance_emails(code, hours_back=hours)
+            except Exception as e:
+                return discord_response_message(f"❌ Could not audit Meet. {type(e).__name__}: {e}", True)
+
+            if not emails:
+                return discord_response_message(f"ℹ️ No attendees found for meeting `{code}` in the last {hours}h window.", True)
+
+            lines = [f"{i}. {em}" for i, em in enumerate(emails, 1)]
+            return discord_response_message(
+                "👥 **Meet attendance (unique emails)**\n"
+                f"🧩 Code: `{code}`  •  ⏱️ Window: last {hours}h\n\n" + "\n".join(lines),
+                True
             )
 
         return discord_response_message("Unknown command.", True)
