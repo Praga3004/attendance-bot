@@ -568,6 +568,40 @@ def get_today_status(name: str, user_id: str) -> Tuple[bool, bool]:
             break
 
     return has_login, has_logout
+def list_attendance_employees_current_month(max_items: int = 25) -> list[tuple[str, str]]:
+    """
+    Returns [(display_name, key)], deduped within the current IST month.
+    Key = user_id if present else lowercased name (for stability).
+    """
+    rows = fetch_attendance_rows()
+    mstart, mend = _month_bounds_ist()
+
+    seen = set()
+    out: list[tuple[str,str]] = []
+
+    for r in rows:
+        if len(r) < 2: 
+            continue
+        ts_cell = r[0]
+        nm = (r[1] or "").strip()
+        uid = (r[3] if len(r) > 3 else "").strip()
+
+        dt = _ts_cell_to_date_ist(ts_cell)
+        if not dt or not (mstart <= dt <= mend) or not nm:
+            continue
+
+        key = uid or nm.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        # For autocomplete, value should be the visible name
+        out.append((nm, nm))
+        if len(out) >= max_items:
+            break
+
+    # Sort by name
+    out.sort(key=lambda x: x[0].lower())
+    return out
 
 def append_leave_row(name: str, from_date: str, days: int, to_date: str, reason: str) -> None:
     service = get_service()
@@ -576,7 +610,7 @@ def append_leave_row(name: str, from_date: str, days: int, to_date: str, reason:
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
         range="'Leave Requests'!A:F",
-        valueInputOption="USER_ENTERED",
+        valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body=body,
     ).execute()
@@ -585,7 +619,7 @@ def append_attendance_row(name: str, action: str, user_id: str, progress: str | 
     Writes: [=NOW(), name, action, user_id, progress]
     """
     service = get_service()
-    timeVal=datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d-%H:%M:%S")
+    timeVal=datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y %m %d-%H:%M:%S")
     
     values = [[timeVal, name, action, user_id or "", (progress or "").strip()]]
     body = {"values": values}
@@ -1035,6 +1069,17 @@ async def discord_interaction(
             if opt.get("focused"):
                 focused = opt
                 break
+        if cmd_name == "leavecount" and focused and focused.get("name") == "name":
+            # Optional: filter by what the user already typed
+            q = (focused.get("value") or "").strip().lower()
+            choices = []
+            for disp, val in list_attendance_employees_current_month():
+                if q and q not in disp.lower():
+                    continue
+                choices.append({"name": disp[:100], "value": val})
+                if len(choices) >= 25:
+                    break
+            return JSONResponse({"type": 8, "data": {"choices": choices}})
         if cmd_name in ("clearinvoice", "recordtax") and focused and focused.get("name") == "invoicenumber":
             q = (focused.get("value") or "").strip()
             rows = list_invoices_for_autocomplete(q)
