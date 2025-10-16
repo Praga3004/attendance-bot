@@ -468,6 +468,8 @@ def _cell_is_today_ist(ts_val: Any) -> bool:
 
     # Numeric (Google Sheets serial) -> convert via existing helper
     dt = _sheets_serial_to_dt_ist(ts_val)
+    print(tday)
+    print(dt)
     if dt is not None:
         return dt.date() == tday
 
