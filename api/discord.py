@@ -451,14 +451,24 @@ def discord_response_message(content: str, ephemeral: bool = True) -> JSONRespon
 
 # ========= Timestamp parsing (supports Google Sheets serials) =========
 _SHEETS_EPOCH = datetime(1899, 12, 30)  # Google Sheets epoch (day 0)
+ # standard Google Sheets epoch
 
 def _sheets_serial_to_dt_ist(value: Any) -> datetime | None:
-    """Convert Google Sheets numeric date/time serial -> IST-aware datetime."""
-    try:
-        days = float(value)
-    except (TypeError, ValueError):
+    """Convert Google Sheets numeric or string date/time -> IST datetime."""
+    if value is None or str(value).strip() == "":
         return None
-    dt = _SHEETS_EPOCH + timedelta(days=days)
+
+    try:
+        # Case 1: numeric serial number
+        days = float(value)
+        dt = _SHEETS_EPOCH + timedelta(days=days)
+    except (TypeError, ValueError):
+        try:
+            # Case 2: ISO-style string
+            dt = datetime.fromisoformat(str(value))
+        except Exception:
+            return None
+
     return dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
 # Add this helper next to your other helpers
 def _cell_is_today_ist(ts_val: Any) -> bool:
