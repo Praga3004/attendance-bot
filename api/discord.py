@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from datetime import datetime
 from typing import Any, Tuple, List
+import logging
 
 # Discord signature verification
 import nacl.signing
@@ -22,6 +23,7 @@ from dotenv import load_dotenv
 # Load local .env only for local testing; ignored on Vercel
 load_dotenv(r"../.env")
 
+logger = logging.getLogger(__name__)
 app = FastAPI(title="Discord Attendance → Google Sheets")
 
 # ========= ENV VARS =========
@@ -468,8 +470,7 @@ def _cell_is_today_ist(ts_val: Any) -> bool:
 
     # Numeric (Google Sheets serial) -> convert via existing helper
     dt = _sheets_serial_to_dt_ist(ts_val)
-    print(tday)
-    print(dt)
+    logger.info(f"Today:{tday} \t DT: {dt}\n")
     if dt is not None:
         return dt.date() == tday
 
