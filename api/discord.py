@@ -462,10 +462,12 @@ def _sheets_serial_to_dt_ist(value: Any) -> datetime | None:
         # Case 1: numeric serial number
         days = float(value)
         dt = _SHEETS_EPOCH + timedelta(days=days)
+        logger.info(f"Parsed numeric serial {value} to DT: {dt}\n")
     except (TypeError, ValueError):
         try:
             # Case 2: ISO-style string
             dt = datetime.fromisoformat(str(value))
+            logger.info(f"Parsed ISO string {value} to DT: {dt}\n")
         except Exception:
             return None
 
