@@ -953,8 +953,8 @@ def append_wfh_decision_row(name: str, day: str, reason: str,
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
         range="'WFH Decisions'!A:G",
-        valueInputOption="USER_ENTERED",
-        insertDataOption="INSERT_ROWS",
+        valueRenderOption="UNFORMATTED_VALUE",
+        dateTimeRenderOption="SERIAL_NUMBER",
         body=body,
     ).execute()
 
@@ -1588,7 +1588,7 @@ async def discord_interaction(
             member = payload.get("member", {}) or {}
             user = member.get("user", {}) or payload.get("user", {}) or {}
             name = (user.get("global_name") or user.get("username") or "Unknown").strip()
-
+            logger.info(f"Days type{type(day)}, Day value{day}")
             if not day:
                 ch_id = payload.get("channel_id")
                 if ch_id: send_wfh_date_picker(ch_id)
