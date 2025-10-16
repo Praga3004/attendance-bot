@@ -449,32 +449,40 @@ def discord_response_message(content: str, ephemeral: bool = True) -> JSONRespon
         data["flags"] = 1 << 6  # ephemeral flag = 64
     return JSONResponse({"type": 4, "data": data})
 
-# ========= Timestamp parsing (supports Google Sheets serials) =========
-_SHEETS_EPOCH = datetime(1899, 12, 30)  # Google Sheets epoch (day 0)
- # standard Google Sheets epoch
+_SHEETS_EPOCH = datetime(1899, 12, 30) 
 
-def _sheets_serial_to_dt_ist(value: Any) -> datetime | None:
-    """Convert Google Sheets numeric or string date/time -> IST datetime."""
+def _sheets_serial_to_dt_ist(value):
+    """Convert Sheets serial or date/time string to IST datetime."""
     if value is None or str(value).strip() == "":
         return None
 
-    try:
-        # Case 1: numeric serial number
-        days = float(value)
-        dt = _SHEETS_EPOCH + timedelta(days=days)
-        logger.info(f"Parsed numeric serial {value} to DT: {dt}\n")
-    except (TypeError, ValueError):
-        logger.info(f"Value {value} not a numeric serial, trying ISO parse\n")
-        try:
-            # Case 2: ISO-style string
-            dt = datetime.fromisoformat(str(value))
-            logger.info(f"Parsed ISO string {value} to DT: {dt}\n")
-        except Exception:
-            logger.info(f"Failed to parse {value} as ISO datetime\n")
-            return None
+    v = str(value).strip()
 
-    return dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
-# Add this helper next to your other helpers
+    # Try numeric first
+    try:
+        days = float(v)
+        dt = _SHEETS_EPOCH + timedelta(days=days)
+        return dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+    except ValueError:
+        pass
+
+    patterns = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d-%H:%M:%S",
+        "%Y %m %d-%H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d", 
+    ]
+
+    for fmt in patterns:
+        try:
+            dt = datetime.strptime(v, fmt)
+            return dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        except ValueError:
+            continue
+
+    print(f"[WARN] Could not parse datetime: {v!r}")
+    return None
 def _cell_is_today_ist(ts_val: Any) -> bool:
     """
     True if the timestamp cell (numeric serial or string) is the same Y-M-D
