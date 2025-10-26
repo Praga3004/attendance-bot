@@ -984,7 +984,11 @@ def post_wfh_status_update(name: str, day: str, reason: str,
 def send_leave_from_picker(channel_id: str) -> bool:
     if not (BOT_TOKEN and channel_id):
         return False
-    opts = _date_opts(today_ist_date(), 25)
+    today = today_ist_date()
+    options = []
+    for i in range(0, 14):
+        d = today + timedelta(days=i)
+        options.append({"label": f"{d.isoformat()} ({d.strftime('%a')})", "value": d.isoformat()})
     body = {
         "content": "📅 Pick the **start** date for your leave:",
         "components": [{
@@ -994,7 +998,7 @@ def send_leave_from_picker(channel_id: str) -> bool:
                 "custom_id": "leave_from_select",
                 "placeholder": "Select start date (From)",
                 "min_values": 1, "max_values": 1,
-                "options": opts
+                "options": options
             }]
         }]
     }
@@ -1056,6 +1060,10 @@ def parse_wfh_card(content: str) -> tuple[str, str, str]:
     name = name.strip("* ").strip()
     date_str = _grab_between("**Date:** ", content) or _grab_between("Date:", content)
     reason   = _grab_between("**Reason:** ", content) or _grab_between("Reason:", content)
+    logger.info(f"Parsed WFH card: Name={name}, Date={date_str}, Reason={reason}")
+    logger.info(f"Full content:\n{content}\n---")
+    logger.info(f"Types of fields: Name={type(name)}, Date={type(date_str)}, Reason={type(reason)}")
+    logger.info(f"-- End of log ---")
     return name, date_str, reason
 
 # ========= ROUTE =========
