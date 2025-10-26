@@ -966,7 +966,7 @@ def append_wfh_decision_row(name: str, day: str, reason: str,
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
         range="'WFH Decisions'!A:G",
-        valueInputOption="USER_ENTERED",
+        valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body=body,
     ).execute()
@@ -1879,7 +1879,7 @@ async def discord_interaction(
         # ---- WFH approve/reject buttons
         if custom_id in ("wfh_approve", "wfh_reject"):
             name, date_str, wfh_reason = parse_wfh_card(content)
-            date_str=sheets_serial_to_date_ist(date_str)
+           
             if not (name and date_str):
                 return JSONResponse({"type": 4, "data": {"content": "❌ Could not parse WFH request.", "flags": 1 << 6}})
 
