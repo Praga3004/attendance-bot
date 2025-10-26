@@ -790,7 +790,7 @@ def append_content_decision_row_from_card(card_content: str, decision: str, revi
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
         range="'Content Decisions'!A:H",
-        valueInputOption="USER_ENTERED",
+        valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body=body,
     ).execute()
@@ -805,7 +805,7 @@ def append_asset_decision_row_from_card(card_content: str, decision: str, review
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
         range="'Asset Decisions'!A:H",
-        valueInputOption="USER_ENTERED",
+        valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body=body,
     ).execute()
