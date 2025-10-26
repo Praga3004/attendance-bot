@@ -784,7 +784,7 @@ def append_content_decision_row_from_card(card_content: str, decision: str, revi
     requester, topic, filename, file_url = parse_content_request_card(card_content)
     service = get_service()
     values = [[
-        get_ist_timestamp(), decision, reviewer, requester, topic, filename, file_url, comments or ""
+        str(get_ist_timestamp()), decision, reviewer, requester, topic, filename, file_url, comments or ""
     ]]
     body = {"values": values}
     service.spreadsheets().values().append(
