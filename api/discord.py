@@ -16,6 +16,9 @@ import nacl.signing
 # Google APIs
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
 
 # Utils
 from dotenv import load_dotenv
@@ -26,6 +29,7 @@ load_dotenv(r"../.env")
 logger = logging.getLogger(__name__)
 app = FastAPI(title="Discord Attendance → Google Sheets")
 
+_SHEETS_EPOCH = datetime(1899, 12, 30) 
 # ========= ENV VARS =========
 DISCORD_PUBLIC_KEY           = (os.environ.get("DISCORD_PUBLIC_KEY", "") or "").strip()
 SHEET_ID                     = (os.environ.get("SHEET_ID", "") or "").strip()
@@ -87,6 +91,16 @@ def _to_int(x, default: int = 0) -> int:
         return int(float(str(x)))
     except Exception:
         return default
+
+def sheets_serial_to_date_ist(value: float) -> str:
+    """Convert Google Sheets serial float -> YYYY-MM-DD (IST)."""
+    try:
+        days = float(value)
+    except (TypeError, ValueError):
+        return ""
+    dt = _SHEETS_EPOCH + timedelta(days=days)
+    dt_ist = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    return dt_ist.date().isoformat()   # e.g. '2025-10-24'
 
 def _get_opt(opts_list, name: str, default: str = "") -> str:
     """Case-insensitive option getter for slash command options.
@@ -449,7 +463,6 @@ def discord_response_message(content: str, ephemeral: bool = True) -> JSONRespon
         data["flags"] = 1 << 6  # ephemeral flag = 64
     return JSONResponse({"type": 4, "data": data})
 
-_SHEETS_EPOCH = datetime(1899, 12, 30) 
 
 def _sheets_serial_to_dt_ist(value):
     """Convert Sheets serial or date/time string to IST datetime."""
@@ -1866,6 +1879,7 @@ async def discord_interaction(
         # ---- WFH approve/reject buttons
         if custom_id in ("wfh_approve", "wfh_reject"):
             name, date_str, wfh_reason = parse_wfh_card(content)
+            date_str=sheets_serial_to_date_ist(date_str)
             if not (name and date_str):
                 return JSONResponse({"type": 4, "data": {"content": "❌ Could not parse WFH request.", "flags": 1 << 6}})
 
