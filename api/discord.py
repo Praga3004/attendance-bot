@@ -953,8 +953,8 @@ def append_wfh_decision_row(name: str, day: str, reason: str,
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
         range="'WFH Decisions'!A:G",
-        valueRenderOption="USER_ENTERED",
-        dateTimeRenderOption="INSERT_ROWS",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
         body=body,
     ).execute()
 
