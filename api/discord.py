@@ -954,7 +954,7 @@ def append_wfh_decision_row(name: str, day: str, reason: str,
         spreadsheetId=SHEET_ID,
         range="'WFH Decisions'!A:G",
         valueRenderOption="USER_ENTERED",
-        dateTimeRenderOption="SERIAL_NUMBER",
+        dateTimeRenderOption="INSERT_ROWS",
         body=body,
     ).execute()
 
