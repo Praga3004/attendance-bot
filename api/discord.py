@@ -799,7 +799,7 @@ def append_asset_decision_row_from_card(card_content: str, decision: str, review
     requester, asset_name, filename, file_url = parse_asset_review_card(card_content)
     service = get_service()
     values = [[
-        get_ist_timestamp(), decision, reviewer, requester, asset_name, filename, file_url, comments or ""
+       str(get_ist_timestamp()), decision, reviewer, requester, asset_name, filename, file_url, comments or ""
     ]]
     body = {"values": values}
     service.spreadsheets().values().append(
