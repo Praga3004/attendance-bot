@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo
 from datetime import datetime
 from typing import Any, Tuple, List
 import logging
-import pytz
 
 # Discord signature verification
 import nacl.signing
@@ -20,6 +19,7 @@ from googleapiclient.discovery import build
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+
 # Utils
 from dotenv import load_dotenv
 
@@ -28,15 +28,7 @@ load_dotenv(r"../.env")
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="Discord Attendance → Google Sheets")
-ROLE_HIERARCHY = {
-    "Founder": 1,
-    "Admin": 2,
-    "HR": 3,
-    "CoreTeam": 4,
-    "EngTeam": 5,
-    "ContentTeam": 6,
-    "Intern": 7
-}
+
 _SHEETS_EPOCH = datetime(1899, 12, 30) 
 # ========= ENV VARS =========
 DISCORD_PUBLIC_KEY           = (os.environ.get("DISCORD_PUBLIC_KEY", "") or "").strip()
@@ -48,25 +40,17 @@ ADMIN_SUBJECT               = (os.environ.get("ADMIN_SUBJECT", "") or "").strip(
 
 # Channels / roles
 
-FINANCE_CHANNEL_ID           = (os.environ.get("FINANCE_CHANNEL_ID", "") or "").strip()
+FINANCE_CHANNEL_ID           = (os.environ.get("FINANCE_CHANNEL_ID", "") or "").strip() 
 APPROVER_CHANNEL_ID          = (os.environ.get("APPROVER_CHANNEL_ID", "") or "").strip()
 APPROVER_USER_ID             = (os.environ.get("APPROVER_USER_ID", "") or "").strip()
 LEAVE_STATUS_CHANNEL_ID      = (os.environ.get("LEAVE_STATUS_CHANNEL_ID", "") or "").strip()
 HR_ROLE_ID                   = (os.environ.get("HR_ROLE_ID", "") or "").strip()
-CORETEAM_ROLE_IDS     = [r.strip() for r in (os.environ.get("CORETEAM_ROLE_IDS","").split(",") if os.environ.get("CORETEAM_ROLE_IDS") else [])]
-ENGTEAM_ROLE_IDS      = [r.strip() for r in (os.environ.get("ENGTEAM_ROLE_IDS","").split(",") if os.environ.get("ENGTEAM_ROLE_IDS") else [])]
-CONTENTTEAM_ROLE_IDS  = [r.strip() for r in (os.environ.get("CONTENTTEAM_ROLE_IDS","").split(",") if os.environ.get("CONTENTTEAM_ROLE_IDS") else [])]
-INTERN_ROLE_IDS       = [r.strip() for r in (os.environ.get("INTERN_ROLE_IDS","").split(",") if os.environ.get("INTERN_ROLE_IDS") else [])]
-FOUNDER_ROLE_IDS      = [r.strip() for r in (os.environ.get("FOUNDER_ROLE_IDS","").split(",") if os.environ.get("FOUNDER_ROLE_IDS") else [])]
 ATTENDANCE_CHANNEL_ID        = (os.environ.get("ATTENDANCE_CHANNEL_ID", "") or "").strip()
 CONTENT_REQUESTS_CHANNEL_ID  = (os.environ.get("CONTENT_REQUESTS_CHANNEL_ID", "") or "").strip()
 ASSETS_REVIEWS_CHANNEL_ID    = (os.environ.get("ASSETS_REVIEWS_CHANNEL_ID", "") or "").strip()
 LEAVE_REQUESTS_CHANNEL_ID    = (os.environ.get("LEAVE_REQUESTS_CHANNEL_ID", "") or "").strip()
 CONTENT_TEAM_CHANNEL_ID      = (os.environ.get("CONTENT_TEAM_CHANNEL_ID", "") or "").strip()
-TASKS_CHANNEL_ID      = (os.environ.get("TASKS_CHANNEL_ID","") or "").strip()
 
-# Sheets range for tasks
-TASKS_RANGE           = "'Task Tracker'!A:J"
 # ========= CONSTANT SHEET RANGES =========
 # We always read/write A:E so we can store UserID + Progress
 ATTENDANCE_READ_RANGE  = "Attendance!A:E"
@@ -101,152 +85,7 @@ CMD_ALLOWED_CHANNELS.update({
 INVOICES_RANGE        = "'Invoices'!A:E"        
 INVOICE_CLEARS_RANGE  = "'Invoice Clears'!A:D"  
 TAXES_RANGE           = "'Taxes'!A:E"           
-ALLOWED_ASSIGNMENTS = {
-    "Founder": ["Founder", "HR", "CoreTeam", "EngTeam", "ContentTeam", "Intern"],
-    "HR": ["CoreTeam", "EngTeam", "ContentTeam", "Intern"],
-    "CoreTeam": ["EngTeam", "ContentTeam", "Intern"],
-    "EngTeam": ["EngTeam", "Intern"],
-    "Intern": []
-}
-TASKS_RANGE = "'Tasks'!A:K"
 
-_MEET_CODE_RE = re.compile(r"(?:https?://)?meet\.google\.com/([a-z]{3}-[a-z]{4}-[a-z]{3})(?:\?.*)?$", re.I)
-def append_task_row_to_sheet(task_row):
-    """ Append the task row to Google Sheets """
-    try:
-        sheets_service = get_google_sheets_service()
-        sheet = sheets_service.spreadsheets()
-        range_name = "tasks!A:K"  # Update range name accordingly
-        values = [task_row]
-        body = {
-            'values': values
-        }
-        sheet.values().append(
-            spreadsheetId=os.getenv("SPREADSHEET_ID"),
-            range=range_name,
-            valueInputOption="RAW",
-            body=body
-        ).execute()
-    except Exception as e:
-        print(f"Error appending task: {str(e)}")
-
-# Helper function to get Google Sheets API service
-def get_google_sheets_service():
-    credentials = service_account.Credentials.from_service_account_info(
-        json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON")),
-        scopes=["https://www.googleapis.com/auth/spreadsheets"]
-    )
-    service = build("sheets", "v4", credentials=credentials)
-    return service
-
-# Function to assign task to a user
-def assign_task_to_sheet(assigned_by, assigner_role, task, project, deadline, assignee, overviewed_by, comments=""):
-    """ Assign task and log it into the sheet """
-    # Get current timestamp in IST
-    ist = pytz.timezone("Asia/Kolkata")
-    timestamp = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S")
-    
-    task_row = [
-        timestamp,         # Timestamp
-        assigned_by,       # AssignedBy
-        assigner_role,     # AssignerRole
-        task,              # Task
-        project,           # Project
-        deadline,          # DeadlineISO
-        assignee,          # Assignee
-        overviewed_by,     # OverviewedBy
-        "Not Completed",   # Completed status
-        comments,          # Comments
-        ""                 # Closed timestamp (empty until closed)
-    ]
-    
-    # Append task row to the sheet
-    append_task_row_to_sheet(task_row)
-
-# Function to update a task's status and comments
-def update_task_in_sheet(task_row, status, comment=""):
-    """ Update task status and comments in the sheet """
-    updated_task_row = [
-        task_row[0],  # Timestamp
-        task_row[1],  # AssignedBy
-        task_row[2],  # AssignerRole
-        task_row[3],  # Task
-        task_row[4],  # Project
-        task_row[5],  # DeadlineISO
-        task_row[6],  # Assignee
-        task_row[7],  # OverviewedBy
-        status,       # New Status (Completed, In Progress, etc.)
-        comment,      # New Comment
-        task_row[10]  # Closed timestamp (unchanged unless closed)
-    ]
-    
-    # Update task row with new status and comment
-    update_task_row_in_sheet(updated_task_row)
-
-# Function to update task row in the sheet
-def update_task_row_in_sheet(updated_task_row):
-    """ Update the task row in the Google Sheets """
-    try:
-        sheets_service = get_google_sheets_service()
-        sheet = sheets_service.spreadsheets()
-        range_name = f"tasks!A{updated_task_row[0]}"  # Assuming timestamp is unique, else use task ID
-        body = {
-            'values': [updated_task_row]
-        }
-        sheet.values().update(
-            spreadsheetId=os.getenv("SPREADSHEET_ID"),
-            range=range_name,
-            valueInputOption="RAW",
-            body=body
-        ).execute()
-    except Exception as e:
-        print(f"Error updating task: {str(e)}")
-
-# Function to close a task
-def close_task(task_row):
-    """ Close the task by marking it as completed and adding a closed timestamp """
-    task_row[8] = "Completed"  # Mark as completed
-    task_row[10] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Set Closed timestamp
-    
-    # Update task row with completed status
-    update_task_row_in_sheet(task_row)
-
-# Function to get all assigned tasks of a user
-def get_assigned_tasks(user):
-    """ Get all tasks assigned to a specific user """
-    tasks = fetch_tasks_assigned_to_user(user)
-    
-    # Format the tasks as a list of strings for display
-    task_list = []
-    for task in tasks:
-        task_list.append(f"Task: {task[3]}, Status: {task[8]}, Assigned By: {task[1]}")
-    
-    # Return the formatted task list
-    return "\n".join(task_list)
-
-# Function to fetch tasks assigned to a user from the sheet
-def fetch_tasks_assigned_to_user(user):
-    """ Fetch tasks assigned to the specified user """
-    try:
-        sheets_service = get_google_sheets_service()
-        sheet = sheets_service.spreadsheets()
-        range_name = "tasks!A:K"
-        result = sheet.values().get(spreadsheetId=os.getenv("SPREADSHEET_ID"), range=range_name).execute()
-        rows = result.get('values', [])
-        
-        # Filter rows where the assignee matches the user
-        tasks = [row for row in rows if row[6] == user]  # Assignee is at index 6
-        return tasks
-    except Exception as e:
-        print(f"Error fetching tasks: {str(e)}")
-        return []
-
-def can_assign(assigner_roles, assignee_role):
-    """Return True if assigner can assign to assignee."""
-    for r in assigner_roles:
-        if assignee_role in ALLOWED_ASSIGNMENTS.get(r, []):
-            return True
-    return False
 def _to_int(x, default: int = 0) -> int:
     try:
         return int(float(str(x)))
@@ -325,61 +164,6 @@ def fetch_invoices():
         dateTimeRenderOption="SERIAL_NUMBER",
     ).execute()
     return resp.get("values", []) or []
-# ----- Role mapping (Discord role IDs -> our categories) -----
-def _categorize_roles(discord_role_ids: list[str]) -> list[str]:
-    """Return list of our high-level categories the member belongs to."""
-    if not discord_role_ids:
-        return []
-    s = set(str(r) for r in discord_role_ids)
-    cats = []
-    if any(r in s for r in FOUNDER_ROLE_IDS):     cats.append("Founder")
-    if any(r in s for r in HR_ROLE_ID):          cats.append("HR")
-    if any(r in s for r in CORETEAM_ROLE_IDS):    cats.append("CoreTeam")
-    if any(r in s for r in ENGTEAM_ROLE_IDS):     cats.append("EngTeam")
-    if any(r in s for r in CONTENTTEAM_ROLE_IDS): cats.append("ContentTeam")
-    if any(r in s for r in INTERN_ROLE_IDS):      cats.append("Intern")
-    return cats
-
-def _first_category_for(discord_role_ids: list[str]) -> str:
-    """Pick a primary category for a user (ordered by seniority)."""
-    cats = _categorize_roles(discord_role_ids)
-    order = ["Founder", "HR", "CoreTeam", "EngTeam", "ContentTeam", "Intern"]
-    for o in order:
-        if o in cats:
-            return o
-    return "Unknown"
-
-# ----- Assignment permissions matrix -----
-
-
-def _can_assign(assigner_categories: list[str], assignee_category: str) -> bool:
-    """Assigner may have multiple categories; allow if any category permits."""
-    for c in assigner_categories or []:
-        if assignee_category in ALLOWED_ASSIGNMENTS.get(c, set()):
-            return True
-    return False
-
-# ----- Sheets: append task row -----
-def append_task_row(assigned_by: str, assigner_role: str,
-                    task: str, project: str, deadline_iso: str,
-                    assignee_disp: str, overviewed_disp: str,
-                    status: str = "Pending", comments: str = "") -> None:
-    """
-    Columns: A AssignedAt | B AssignedBy | C Role | D Task | E Project
-             F Deadline   | G Assignee   | H Overviewed | I Status | J Comments
-    Use RAW to preserve ISO date text and avoid float serial surprises.
-    """
-    service = get_service()
-    row = [get_ist_timestamp(), assigned_by, assigner_role, task, project,
-           deadline_iso, assignee_disp, overviewed_disp, status, comments]
-    body = {"values": [row]}
-    service.spreadsheets().values().append(
-        spreadsheetId=SHEET_ID,
-        range=TASKS_RANGE,
-        valueInputOption="RAW",              # <-- keeps 'YYYY-MM-DD' as text unless column is formatted as date
-        insertDataOption="INSERT_ROWS",
-        body=body,
-    ).execute()
 
 def fetch_invoice_clears():
     service = get_service()
@@ -400,18 +184,7 @@ def fetch_taxes():
         dateTimeRenderOption="SERIAL_NUMBER",
     ).execute()
     return resp.get("values", []) or []
-from datetime import datetime, timedelta
 
-def generate_deadline_options():
-    today = datetime.today()
-    options = []
-    for i in range(1, 15):  # Next 14 days
-        day = today + timedelta(days=i)
-        options.append({
-            "label": f"{day.strftime('%Y-%m-%d')} ({day.strftime('%A')})",  # Label as YYYY-MM-DD (Day of the week)
-            "value": day.strftime('%Y-%m-%d')  # Use YYYY-MM-DD as value
-        })
-    return options
 def compute_fin_status():
     """Returns (total_invoiced, total_cleared, outstanding_total, taxes_by_type dict, outstanding_by_invoice dict)."""
     inv = fetch_invoices()
@@ -457,10 +230,7 @@ def compute_fin_status():
     outstanding_total = max(total_invoiced - total_cleared, 0.0)
 
     return total_invoiced, total_cleared, outstanding_total, taxes_by_type, outstanding_by_invoice
-def is_assignment_allowed(assigner_role: str, assignee_role: str) -> bool:
-    assigner_hierarchy = ROLE_HIERARCHY.get(assigner_role, 0)
-    assignee_hierarchy = ROLE_HIERARCHY.get(assignee_role, 0)
-    return assigner_hierarchy < assignee_hierarchy
+
 def _get_attachment_from_options(interaction_payload: dict, option_name: str):
     """
     Returns (filename, url, content_type, size) for the attachment option.
@@ -578,6 +348,8 @@ def get_reports_service():
     ).with_subject(ADMIN_SUBJECT)
     return build("admin", "reports_v1", credentials=creds, cache_discovery=False)
 
+
+_MEET_CODE_RE = re.compile(r"(?:https?://)?meet\.google\.com/([a-z]{3}-[a-z]{4}-[a-z]{3})(?:\?.*)?$", re.I)
 
 def extract_meet_code(meet_link_or_code: str) -> str:
     """
@@ -1185,83 +957,6 @@ def append_wfh_row(name: str, day: str, reason: str) -> None:
         insertDataOption="INSERT_ROWS",
         body=body,
     ).execute()
-def fetch_tasks_rows() -> List[List[str]]:
-    service = get_service()
-    resp = service.spreadsheets().values().get(
-        spreadsheetId=SHEET_ID,
-        range=TASKS_RANGE,
-        valueRenderOption="UNFORMATTED_VALUE",
-        dateTimeRenderOption="SERIAL_NUMBER",
-    ).execute()
-    return resp.get("values", []) or []
-
-def _find_header_start(rows: List[List[str]]) -> int:
-    """Return data start index (skip header if present)."""
-    if not rows:
-        return 0
-    hdr = [str(c).strip().lower() for c in rows[0]]
-    # crude header detection: look for 'task' and 'status'
-    if any("task" in (hdr[i] if i < len(hdr) else "") for i in range(11)) and \
-       any("status" in (hdr[i] if i < len(hdr) else "") for i in range(11)):
-        return 1
-    return 0
-
-def list_overlooked_tasks(overview_name: str, status_filter: str | None = "pending", limit: int = 25):
-    """
-    Returns list of (row_num, task, project, deadline, assignee, status, comments).
-    row_num is the 1-based sheet row number (for updates).
-    """
-    rows = fetch_tasks_rows()
-    start = _find_header_start(rows)
-    out = []
-    for idx in range(start, len(rows)):
-        r = rows[idx]
-        # Expand row to length 11
-        r = list(r) + [""] * (11 - len(r))
-        _timestamp, assigned_by, assigner_role, task, project, deadline = r[:6]
-        assignee, overviewed_by, status, comments = r[6:10]
-        # match overviewed_by to overview_name (case-insensitive)
-        if (overviewed_by or "").strip().lower() != (overview_name or "").strip().lower():
-            continue
-        if status_filter and (status or "").strip().lower() != status_filter.strip().lower():
-            continue
-        row_num = idx + 1  # A1 row number
-        out.append((row_num, str(task or ""), str(project or ""), str(deadline or ""),
-                    str(assignee or ""), str(status or ""), str(comments or "")))
-        if len(out) >= limit:
-            break
-    return out
-
-def complete_task_by_row(row_num: int, who: str, extra_comment: str = "") -> None:
-    """
-    Sets Status (col I) = 'Completed' and appends comment in col J with timestamp+who.
-    """
-    if row_num <= 0:
-        raise ValueError("Invalid row number")
-    service = get_service()
-    ts = get_ist_timestamp()
-    # Read existing comments (col J)
-    read = service.spreadsheets().values().get(
-        spreadsheetId=SHEET_ID,
-        range=f"'Tasks'!J{row_num}:J{row_num}",
-        valueRenderOption="UNFORMATTED_VALUE",
-        dateTimeRenderOption="SERIAL_NUMBER",
-    ).execute()
-    old_comment = ((read.get("values") or [[]])[0] or [""])[0] if read.get("values") else ""
-    sep = " | " if old_comment else ""
-    new_comment = f"{old_comment}{sep}Closed {ts} by {who}" + (f" — {extra_comment}" if extra_comment else "")
-
-    # Prepare batch update: I=row Status, J=Comments
-    body = {
-        "valueInputOption": "USER_ENTERED",
-        "data": [
-            {"range": f"'Tasks'!I{row_num}:I{row_num}", "values": [["Completed"]]},
-            {"range": f"'Tasks'!J{row_num}:J{row_num}", "values": [[new_comment]]},
-        ],
-    }
-    service.spreadsheets().values().batchUpdate(
-        spreadsheetId=SHEET_ID, body=body
-    ).execute()
 
 def append_wfh_decision_row(name: str, day: str, reason: str,
                             decision: str, reviewer: str, note: str = "") -> None:
@@ -1492,286 +1187,8 @@ async def discord_interaction(
         data = payload.get("data", {}) or {}
         cmd_name = data.get("name", "")
         channel_id = payload.get("channel_id", "")
-        # Inside the main POST route
-
-    if cmd_name == "update_task":
-        data_opts = data.get("options", []) or []
-        task_row_num = _get_opt(data_opts, "task_row")
-        status = _get_opt(data_opts, "status")
-        comment = _get_opt(data_opts, "comment")
-
-        # Assigner data (who is updating the task)
-        member = payload.get("member", {}) or {}
-        user = member.get("user", {}) or payload.get("user", {}) or {}
-        updater_name = (user.get("global_name") or user.get("username") or "Unknown").strip()
-
-        # Check if the user is an overseer of the task
-        try:
-            task = fetch_tasks_rows()  # Fetch all tasks (this could be a call to Google Sheets or your DB)
-            task_data = next((t for t in task if t[0] == task_row_num), None)
-        except Exception as e:
-            return discord_response_message(f"❌ Could not fetch task data. {type(e).__name__}: {e}", True)
-
-        if task_data:
-            task_assignee = task_data[5]  # Assuming assignee is stored in the 6th column
-            overseer = task_data[6]  # Assuming overseer is stored in the 7th column
-            if updater_name != overseer:
-                return discord_response_message("🚫 You are not authorized to update this task. You are not the overseer.", True)
-
-            # Update the task status and comment in the Google Sheet or database
-            try:
-                complete_task_by_row(task_row_num, status=status, comments=comment)  # This can update your task tracking source (e.g., Google Sheets)
-            except Exception as e:
-                return discord_response_message(f"❌ Failed to update task. {type(e).__name__}: {e}", True)
-
-            return discord_response_message(f"✅ Task at Row {task_row_num} updated to **{status}** with comment: {comment}.", True)
-
-        # Inside the main POST route
-
-        if cmd_name == "view_tasks":
-            member = payload.get("member", {}) or {}
-            user = member.get("user", {}) or payload.get("user", {}) or {}
-            username = (user.get("global_name") or user.get("username") or "Unknown").strip()
-
-            # Fetch all tasks
-            try:
-                tasks = fetch_tasks_rows()  # Fetch all tasks (Google Sheets or DB)
-            except Exception as e:
-                return discord_response_message(f"❌ Could not load tasks. {type(e).__name__}: {e}", True)
-
-            assigned_tasks = []
-            overseen_tasks = []
-
-            for task in tasks:
-                assignee = task[5]  # Assignee is stored in the 6th column
-                overseer = task[6]  # Overseer is stored in the 7th column
-                if assignee == username:
-                    assigned_tasks.append(task)
-                if overseer == username:
-                    overseen_tasks.append(task)
-
-            # Construct the message
-            if assigned_tasks or overseen_tasks:
-                msg = f"📋 **Tasks for {username}**:\n"
-                if assigned_tasks:
-                    msg += "\n**Assigned Tasks**:\n"
-                    for task in assigned_tasks:
-                        task_name = task[1]  # Assuming task name is in the 2nd column
-                        project = task[2]  # Project in 3rd column
-                        status = task[7]  # Status in 8th column
-                        msg += f"• **{task_name}** (Project: {project}) — Status: {status}\n"
-
-                if overseen_tasks:
-                    msg += "\n**Tasks Being Overseen**:\n"
-                    for task in overseen_tasks:
-                        task_name = task[1]  # Assuming task name is in the 2nd column
-                        project = task[2]  # Project in 3rd column
-                        status = task[7]  # Status in 8th column
-                        msg += f"• **{task_name}** (Project: {project}) — Status: {status}\n"
-
-                return discord_response_message(msg, True)
-            else:
-                return discord_response_message(f"📝 No tasks found for {username}.", True)
-
-        if cmd_name == "taskassign":
-            data_opts = data.get("options", []) or []
-            task = _get_opt(data_opts, "task")
-            project = _get_opt(data_opts, "project")
-            deadline = _get_opt(data_opts, "deadline")  # 'YYYY-MM-DD'
-
-            assignee_id = ""
-            overview_id = ""
-            for opt in data_opts:
-                n = (opt.get("name") or "").lower()
-                if n == "assignee": assignee_id = str(opt.get("value") or "").strip()
-                if n == "overviewed": overview_id = str(opt.get("value") or "").strip()
-
-            resolved_users = (data.get("resolved", {}) or {}).get("users", {}) or {}
-            assignee_user = resolved_users.get(assignee_id, {}) if assignee_id else {}
-            overview_user = resolved_users.get(overview_id, {}) if overview_id else {}
-
-            assignee_disp = (assignee_user.get("global_name") or assignee_user.get("username") or assignee_id or "").strip()
-            overview_disp = (overview_user.get("global_name") or overview_user.get("username") or overview_id or "").strip()
-
-            # Assigner data (who is assigning the task)
-            member = payload.get("member", {}) or {}
-            assigner_user = member.get("user", {}) or payload.get("user", {}) or {}
-            assigner_name = (assigner_user.get("global_name") or assigner_user.get("username") or "Unknown").strip()
-
-            # Assigner role (who is assigning the task)
-            assigner_role_ids = [str(r) for r in (member.get("roles") or [])]
-            assigner_primary = _first_category_for(assigner_role_ids)
-
-            # Validate inputs
-            if not (task and project and deadline and assignee_disp and overview_disp):
-                return discord_response_message("❌ Missing fields. Required: task, project, deadline, assignee, overviewed.", True)
-
-            # If no deadline is selected, show date picker with options
-            if not deadline:
-                now_ist = today_ist_date()
-                deadline_options = []
-                for i in range(0, 14):  # Generate date options for the next 14 days
-                    d = now_ist + timedelta(days=i)
-                    label = f"{d.isoformat()} ({d.strftime('%a')})"
-                    deadline_options.append({"name": label, "value": d.isoformat()})
-
-                return JSONResponse({
-                    "type": 8,  # Autocomplete options
-                    "data": {
-                        "choices": deadline_options
-                    }
-                })
-
-            # Store task data in Google Sheets
-            try:
-                append_task_row(
-                    assigned_by=assigner_name, 
-                    assigner_role=assigner_primary,
-                    task=task, 
-                    project=project, 
-                    deadline_iso=deadline,
-                    assignee_disp=assignee_disp, 
-                    overviewed_disp=overview_disp,
-                    status="Pending", 
-                    comments="",  # You can update this with optional comments if needed
-                    timestamp=datetime.now().isoformat()  # Current timestamp
-                )
-            except Exception as e:
-                return discord_response_message(f"❌ Failed to log task. {type(e).__name__}: {e}", True)
-
-            # Post a task card (announce)
-            where = TASKS_CHANNEL_ID or channel_id
-            card = (
-                f"📝 **New Task Assigned**\n"
-                f"• **Task:** {task}\n"
-                f"• **Project:** {project}\n"
-                f"• **Deadline:** {deadline}\n"
-                f"• **Assignee:** <@{assignee_id}> ({assignee_disp})\n"
-                f"• **Overviewed by:** <@{overview_id}> ({overview_disp})\n"
-                f"• **Assigned by:** {assigner_name} ({assigner_primary}) • {get_ist_timestamp()} IST\n"
-                f"• **Status:** Pending"
-            )
-            _post_to_channel(where, card)
-
-            return discord_response_message("✅ Task recorded & announced.", True)
-
-        
-                # ----- OVERLOOKED TASKS (list) -----
-        if cmd_name == "overlookedtasks":
-            # optional status filter (defaults to Pending)
-            data_opts = data.get("options", []) or []
-            status_opt = _get_opt(data_opts, "status", "Pending")
-
-            member = payload.get("member", {}) or {}
-            user = member.get("user", {}) or payload.get("user", {}) or {}
-            caller_name = (user.get("global_name") or user.get("username") or "Unknown").strip()
-
-            try:
-                items = list_overlooked_tasks(caller_name, status_filter=status_opt)
-            except Exception as e:
-                return discord_response_message(f"❌ Could not load tasks. {type(e).__name__}: {e}", True)
-
-            if not items:
-                return discord_response_message(f"📝 No **{status_opt}** tasks found where you are *Overviewed By*.", True)
-
-            lines = []
-            for i, (row_num, task, project, deadline, assignee, status, comments) in enumerate(items, 1):
-                lines.append(
-                    f"{i}. **Row {row_num}** • **{task}** (proj: {project})\n"
-                    f"   🗓️ {deadline or '—'}  👤 {assignee or '—'}  🏷️ {status or '—'}"
-                    + (f"\n   💬 {comments}" if comments else "")
-                )
-
-            msg = f"📋 **Overlooked tasks for {caller_name}** — Status: **{status_opt}**\n" + "\n".join(lines)
-            return discord_response_message(msg[:1900], True)  # keep it compact
-
-        # ----- CLOSE TASK (by row number) -----
-        if cmd_name == "closetask":
-            data_opts = data.get("options", []) or []
-            row_str   = _get_opt(data_opts, "taskrow")
-            note      = _get_opt(data_opts, "comment")
-            try:
-                row_num = int(row_str)
-            except Exception:
-                return discord_response_message("❌ Provide a valid **taskrow** (sheet row number).", True)
-
-            member = payload.get("member", {}) or {}
-            user = member.get("user", {}) or payload.get("user", {}) or {}
-            closer = (user.get("global_name") or user.get("username") or "Unknown").strip()
-
-            try:
-                complete_task_by_row(row_num, who=closer, extra_comment=note)
-            except Exception as e:
-                return discord_response_message(f"❌ Failed to close task. {type(e).__name__}: {e}", True)
-
-            return discord_response_message(f"✅ Task at **Row {row_num}** marked **Completed**.", True)
-
                 # ----- RECORD INVOICE -----
-        if cmd_name == "taskassign":
-            data_opts = data.get("options", []) or []
-            task = _get_opt(data_opts, "task")
-            project = _get_opt(data_opts, "project")
-            deadline = _get_opt(data_opts, "deadline")  # 'YYYY-MM-DD'
-
-            assignee_id = ""
-            overview_id = ""
-            for opt in data_opts:
-                n = (opt.get("name") or "").lower()
-                if n == "assignee": assignee_id = str(opt.get("value") or "").strip()
-                if n == "overviewed": overview_id = str(opt.get("value") or "").strip()
-
-            resolved_users = (data.get("resolved", {}) or {}).get("users", {}) or {}
-            assignee_user = resolved_users.get(assignee_id, {}) if assignee_id else {}
-            overview_user = resolved_users.get(overview_id, {}) if overview_id else {}
-
-            assignee_disp = (assignee_user.get("global_name") or assignee_user.get("username") or assignee_id or "").strip()
-            overview_disp = (overview_user.get("global_name") or overview_user.get("username") or overview_id or "").strip()
-
-            # Assigner data (who is assigning the task)
-            member = payload.get("member", {}) or {}
-            assigner_user = member.get("user", {}) or payload.get("user", {}) or {}
-            assigner_name = (assigner_user.get("global_name") or assigner_user.get("username") or "Unknown").strip()
-
-            # Assigner role (who is assigning the task)
-            assigner_role_ids = [str(r) for r in (member.get("roles") or [])]
-            assigner_primary = _first_category_for(assigner_role_ids)
-
-            # Validate inputs
-            if not (task and project and deadline and assignee_disp and overview_disp):
-                return discord_response_message("❌ Missing fields. Required: task, project, deadline, assignee, overviewed.", True)
-
-            # Store task data in Google Sheets
-            try:
-                append_task_row(
-                    assigned_by=assigner_name, 
-                    assigner_role=assigner_primary,
-                    task=task, 
-                    project=project, 
-                    deadline_iso=deadline,
-                    assignee_disp=assignee_disp, 
-                    overviewed_disp=overview_disp,
-                    status="Pending", 
-                    comments="",  # You can update this with optional comments if needed
-                    timestamp=datetime.now().isoformat()  # Current timestamp
-                )
-            except Exception as e:
-                return discord_response_message(f"❌ Failed to log task. {type(e).__name__}: {e}", True)
-
-            # Post a task card (announce)
-            where = TASKS_CHANNEL_ID or channel_id
-            card = (
-                f"📝 **New Task Assigned**\n"
-                f"• **Task:** {task}\n"
-                f"• **Project:** {project}\n"
-                f"• **Deadline:** {deadline}\n"
-                f"• **Assignee:** <@{assignee_id}> ({assignee_disp})\n"
-                f"• **Overviewed by:** <@{overview_id}> ({overview_disp})\n"
-                f"• **Assigned by:** {assigner_name} ({assigner_primary}) • {get_ist_timestamp()} IST\n"
-                f"• **Status:** Pending"
-            )
-            _post_to_channel(where, card)
-
-            return discord_response_message("✅ Task recorded & announced.", True)
+        
         # ----- ATTENDANCE -----
         if cmd_name == "attendance":
             if not channel_allowed(cmd_name, channel_id):
