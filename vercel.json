@@ -1,11 +1,14 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "*.py": {
-      "excludeFiles": "{__pycache__/**,tests/**,__tests__/**,**/*.test.py,**/test_*.py}"
+    "api/discord.py": {
+      "runtime": "python3.9"  // or the correct Python runtime version
     }
   },
   "routes": [
-    { "src": "/api/discord", "dest": "/api/discord.py" }
+    {
+      "src": "/api/discord",
+      "dest": "/api/discord.py"
+    }
   ]
 }
