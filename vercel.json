@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
     "api/discord.py": {
-      "runtime": "python3.9@latest"
+      "runtime": "@vercel/python@3.9"
     }
   },
   "routes": [
