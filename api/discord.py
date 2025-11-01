@@ -40,7 +40,7 @@ ADMIN_SUBJECT               = (os.environ.get("ADMIN_SUBJECT", "") or "").strip(
 
 # Channels / roles
 
-FINANCE_CHANNEL_ID           = (os.environ.get("FINANCE_CHANNEL_ID", "") or "").strip()
+FINANCE_CHANNEL_ID           = (os.environ.get("FINANCE_CHANNEL_ID", "") or "").strip() 
 APPROVER_CHANNEL_ID          = (os.environ.get("APPROVER_CHANNEL_ID", "") or "").strip()
 APPROVER_USER_ID             = (os.environ.get("APPROVER_USER_ID", "") or "").strip()
 LEAVE_STATUS_CHANNEL_ID      = (os.environ.get("LEAVE_STATUS_CHANNEL_ID", "") or "").strip()
