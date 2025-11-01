@@ -2,7 +2,13 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
     "api/discord.py": {
-      "runtime": "python3.9"
+      "runtime": "python3.9"  // This is the correct format for Python 3.9 runtime.
     }
-  }
+  },
+  "routes": [
+    {
+      "src": "/api/discord",
+      "dest": "/api/discord.py"
+    }
+  ]
 }
