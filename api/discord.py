@@ -12,8 +12,7 @@ import logging
 import pytz
 
 # Discord signature verification
-# import nacl.signing
-
+import nacl
 # Google APIs
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
